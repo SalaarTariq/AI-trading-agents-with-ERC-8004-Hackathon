@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+import copy
 
 import numpy as np
 import pandas as pd
@@ -41,6 +42,7 @@ class BacktestResult:
     per_strategy_stats: dict[str, dict] = field(default_factory=dict)
     regime_breakdown: dict[str, dict] = field(default_factory=dict)
     loss_patterns: list[dict] = field(default_factory=list)
+    equity_curve: list[float] = field(default_factory=list)
 
 
 class Backtester:
@@ -193,6 +195,40 @@ class Backtester:
 
         return recommendations
 
+    def tune_execute_confidence(
+        self,
+        datasets: list[str],
+        thresholds: list[float] | None = None,
+        warmup: int = 30,
+    ) -> dict:
+        """
+        Grid search over execution confidence threshold.
+
+        This tunes both the signal execution gate and the risk min_confidence
+        to the same value to keep the pipeline consistent.
+        """
+        thresholds = thresholds or [0.55, 0.60, 0.65, 0.70]
+        best = {"threshold": None, "avg_win_rate": -1.0, "total_pnl": -1e18, "results": []}
+
+        for thr in thresholds:
+            cfg = copy.deepcopy(self.cfg)
+            cfg.signal.execute_confidence_threshold = float(thr)
+            cfg.risk.min_confidence = float(thr)
+            bt = Backtester(cfg=cfg, data_dir=str(self.data_dir))
+            results = bt.run(datasets=datasets, warmup=warmup)
+            if not results:
+                continue
+            avg_wr = float(np.mean([r.win_rate for r in results]))
+            tot_pnl = float(np.sum([r.total_pnl for r in results]))
+            if (avg_wr > best["avg_win_rate"]) or (avg_wr == best["avg_win_rate"] and tot_pnl > best["total_pnl"]):
+                best = {
+                    "threshold": thr,
+                    "avg_win_rate": round(avg_wr, 4),
+                    "total_pnl": round(tot_pnl, 2),
+                    "results": results,
+                }
+        return best
+
     def summary_report(self) -> str:
         """Generate a human-readable summary report."""
         if not self.results:
@@ -227,23 +263,39 @@ class Backtester:
         self, summary: dict, label: str, df: pd.DataFrame, warmup: int
     ) -> BacktestResult:
         """Build a BacktestResult from run_paper_trading output."""
-        total = summary.get("total_trades", 0)
-        wins = summary.get("winning_trades", 0)
-        losses = summary.get("losing_trades", 0)
-        pnl = summary.get("total_pnl", 0.0)
-        pnl_pct = summary.get("pnl_pct", 0.0)
-        win_rate = wins / total if total > 0 else 0.0
+        trades = summary.get("trades", []) or []
+        total = int(summary.get("total_trades", len(trades)))
+        pnl = float(summary.get("total_pnl", 0.0))
+        pnl_pct = float(summary.get("pnl_pct", 0.0))
 
-        # Compute Sharpe from trade PnLs (simplified)
-        sharpe = _compute_sharpe(pnl_pct, total)
+        pnls = [float(t.get("pnl", 0.0)) for t in trades if "pnl" in t]
+        wins_list = [p for p in pnls if p > 0]
+        losses_list = [p for p in pnls if p < 0]
+        wins = len(wins_list)
+        losses = len(losses_list)
+        win_rate = (wins / total) if total > 0 else 0.0
 
-        # Max drawdown estimate
-        max_dd = abs(pnl_pct / 100.0) if pnl < 0 else 0.0
+        # Equity curve
+        initial = float(summary.get("initial_balance", self.cfg.portfolio.initial_balance))
+        equity = [initial]
+        for p in pnls:
+            equity.append(equity[-1] + p)
 
-        # Profit factor
-        avg_win = abs(pnl / wins) if wins > 0 else 0.0
-        avg_loss = abs(pnl / losses) if losses > 0 else 0.0
-        profit_factor = (avg_win * wins) / (avg_loss * losses) if losses > 0 and avg_loss > 0 else 999.0
+        # Returns series (per trade)
+        rets = []
+        for i in range(1, len(equity)):
+            prev = equity[i - 1]
+            rets.append((equity[i] - prev) / prev if prev != 0 else 0.0)
+
+        sharpe = _compute_sharpe_from_returns(rets)
+        max_dd = _max_drawdown(equity)
+
+        gross_profit = float(np.sum(wins_list)) if wins_list else 0.0
+        gross_loss = float(-np.sum(losses_list)) if losses_list else 0.0
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else 999.0
+
+        avg_win = float(np.mean(wins_list)) if wins_list else 0.0
+        avg_loss = float(np.mean([abs(x) for x in losses_list])) if losses_list else 0.0
 
         # Regime breakdown
         regime_bd: dict[str, dict] = {}
@@ -265,15 +317,32 @@ class Backtester:
             avg_win=round(avg_win, 2),
             avg_loss=round(avg_loss, 2),
             regime_breakdown=regime_bd,
+            equity_curve=[round(float(x), 2) for x in equity],
         )
 
 
-def _compute_sharpe(pnl_pct: float, n_trades: int, risk_free: float = 0.0) -> float:
-    """Simplified Sharpe ratio estimate from aggregate stats."""
-    if n_trades <= 1:
+def _compute_sharpe_from_returns(returns: list[float], risk_free: float = 0.0) -> float:
+    """Sharpe ratio from a returns series (per trade)."""
+    if not returns or len(returns) < 2:
         return 0.0
-    # Rough estimate: return per trade / assumed vol
-    ret_per_trade = pnl_pct / n_trades
-    # Assume ~2% std dev per trade for crypto
-    assumed_std = 2.0
-    return round((ret_per_trade - risk_free) / assumed_std, 3) if assumed_std > 0 else 0.0
+    r = np.array(returns, dtype=float)
+    excess = r - risk_free
+    std = float(np.std(excess, ddof=1))
+    if std == 0:
+        return 0.0
+    return float(np.mean(excess) / std)
+
+
+def _max_drawdown(equity: list[float]) -> float:
+    """Maximum drawdown from an equity curve (as positive fraction)."""
+    if not equity:
+        return 0.0
+    peak = equity[0]
+    max_dd = 0.0
+    for v in equity:
+        if v > peak:
+            peak = v
+        dd = (peak - v) / peak if peak != 0 else 0.0
+        if dd > max_dd:
+            max_dd = dd
+    return float(max_dd)
