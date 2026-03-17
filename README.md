@@ -1,0 +1,1 @@
+# AI-trading-agents-with-ERC-8004-Hackathon
