@@ -38,6 +38,8 @@ from modules.momentum import generate_signal as momentum_signal
 from modules.mean_reversion import generate_signal as mean_reversion_signal
 from modules.yield_optimizer import generate_signal as yield_signal
 from modules.ai_predictor import generate_signal_from_strategy_outputs
+from modules.confidence_scoring import compute_confidence
+from utils.indicators import compute_indicators
 from risk.risk_manager import (
     check_risk, update_after_trade, check_trailing_stop, PortfolioState,
 )
@@ -112,112 +114,50 @@ def combine_signals(
     regime: str = "ranging",
 ) -> dict:
     """
-    Combine strategy signals using regime-adaptive weighted voting.
+    Combine strategy signals (spec E).
 
-    Each strategy's signal is converted to a numeric score
-    (BUY=+1, SELL=-1, HOLD=0) weighted by its confidence and
-    the regime-adapted weight. Requires minimum strategy agreement.
-
-    Args:
-        strategy_signals: Dict of strategy name → signal dict.
-        cfg: App config with weight settings.
-        regime: Current market regime.
-
-    Returns:
-        {"action": "BUY"|"SELL"|"HOLD", "confidence": float, "details": dict}
+    - Computes a confidence score and action using `compute_confidence`
+    - Enforces execution threshold in `main.py` call site (downstream)
     """
     cfg = cfg or CONFIG
 
-    # Use regime-adaptive weights if enabled, otherwise use static weights
-    if cfg.signal.use_regime_detection:
-        weights = _get_regime_weights(regime, cfg)
-    else:
-        weights = {
-            "momentum": cfg.weights.momentum,
-            "mean_reversion": cfg.weights.mean_reversion,
-            "ai_predictor": cfg.weights.ai_predictor,
-        }
-    weights["yield_optimizer"] = cfg.weights.yield_optimizer
+    mom = strategy_signals.get("momentum", {"signal": 0, "raw_strength": 0.0})
+    mr = strategy_signals.get("mean_reversion", {"signal": 0, "raw_strength": 0.0})
+    ai = strategy_signals.get("ai_ensemble", {"prob_up": 0.5, "rolling_accuracy": None})
 
-    signal_map = {"BUY": 1.0, "SELL": -1.0, "HOLD": 0.0}
+    atr_norm = None
+    if isinstance(strategy_signals.get("_atr_norm"), (int, float)):
+        atr_norm = float(strategy_signals["_atr_norm"])
 
-    weighted_sum = 0.0
-    total_weight = 0.0
-    details: dict = {}
-    # Track direction agreement
-    buy_count = 0
-    sell_count = 0
+    conf, action = compute_confidence(
+        mom,
+        mr,
+        ai,
+        atr_norm,
+        ai_weight=0.30,
+        ai_weight_low_acc=0.15,
+        ai_max_weight_cap=0.35,
+        ai_min_rolling_acc=0.52,
+    )
 
-    for name, sig in strategy_signals.items():
-        if name == "ai_ensemble":
-            continue
-        w = weights.get(name, 0.1)
-        if w <= 0:
-            continue
-        direction_val = signal_map.get(sig["signal"], 0.0)
-        conf = sig["confidence"]
-        contribution = direction_val * conf * w
-        weighted_sum += contribution
-        total_weight += w * conf
-        details[name] = {
-            "signal": sig["signal"],
-            "confidence": round(conf, 3),
-            "weight": w,
-            "contribution": round(contribution, 4),
-        }
-        if sig["signal"] == "BUY":
-            buy_count += 1
-        elif sig["signal"] == "SELL":
-            sell_count += 1
-
-    # Add AI ensemble signal
-    ai_sig = strategy_signals.get("ai_ensemble")
-    if ai_sig:
-        ai_w = weights.get("ai_predictor", cfg.weights.ai_predictor)
-        ai_val = signal_map.get(ai_sig["signal"], 0.0)
-        ai_conf = ai_sig["confidence"]
-        ai_contrib = ai_val * ai_conf * ai_w
-        weighted_sum += ai_contrib
-        total_weight += ai_w * ai_conf
-        details["ai_ensemble"] = {
-            "signal": ai_sig["signal"],
-            "confidence": round(ai_conf, 3),
-            "weight": ai_w,
-            "contribution": round(ai_contrib, 4),
-        }
-        if ai_sig["signal"] == "BUY":
-            buy_count += 1
-        elif ai_sig["signal"] == "SELL":
-            sell_count += 1
-
-    # Normalize
-    final_score = weighted_sum / total_weight if total_weight > 0 else 0.0
-    threshold = cfg.signal.signal_threshold
-
-    if final_score > threshold:
-        action = "BUY"
-    elif final_score < -threshold:
-        action = "SELL"
-    else:
-        action = "HOLD"
-
-    # Consensus requirement: need min_agreement strategies to agree
-    min_agree = cfg.signal.min_agreement
-    if action == "BUY" and buy_count < min_agree:
-        action = "HOLD"
-    elif action == "SELL" and sell_count < min_agree:
-        action = "HOLD"
-
-    confidence = min(abs(final_score) * 2.5, 1.0)
+    details = {
+        "momentum": {"signal": mom.get("signal"), "raw_strength": round(float(mom.get("raw_strength", 0.0)), 4)},
+        "mean_reversion": {"signal": mr.get("signal"), "raw_strength": round(float(mr.get("raw_strength", 0.0)), 4)},
+        "ai": {
+            "prob_up": round(float(ai.get("prob_up", 0.5)), 4),
+            "rolling_accuracy": ai.get("rolling_accuracy", None),
+        },
+        "atr_norm": atr_norm,
+    }
 
     return {
         "action": action,
-        "confidence": round(confidence, 4),
-        "score": round(final_score, 4),
+        "confidence": round(float(conf), 4),
+        "score": round(float(conf), 4),
         "details": details,
         "regime": regime,
-        "buy_agreement": buy_count,
-        "sell_agreement": sell_count,
+        "buy_agreement": int((mom.get("signal", 0) == 1)) + int((mr.get("signal", 0) == 1)),
+        "sell_agreement": int((mom.get("signal", 0) == -1)) + int((mr.get("signal", 0) == -1)),
     }
 
 
@@ -271,6 +211,9 @@ def run_paper_trading(
         current_price = window["close"].iloc[-1]
         timestamp = str(window.index[-1])
 
+        idx = window.index[-1]
+
+
         # --- Update trailing stop and check if open position hits SL/TP ---
         if open_position:
             open_position = check_trailing_stop(open_position, current_price, cfg.risk)
@@ -312,9 +255,13 @@ def run_paper_trading(
         mom_sig = momentum_signal(window, cfg.momentum)
         mr_sig = mean_reversion_signal(window, cfg.mean_reversion)
 
+        ind = compute_indicators(window)
+        atr_norm = ind.atr_norm_14 if ind is not None else None
+
         strategy_signals = {
             "momentum": mom_sig,
             "mean_reversion": mr_sig,
+            "_atr_norm": atr_norm,
         }
 
         # Only include yield optimizer if weight > 0
@@ -353,8 +300,13 @@ def run_paper_trading(
             "pair": pair,
             "current_price": round(current_price, 8),
             "strategy_signals": {
-                k: {"signal": v["signal"], "confidence": round(v["confidence"], 4)}
+                k: (
+                    {"signal": v.get("signal"), "raw_strength": round(float(v.get("raw_strength", 0.0)), 4)}
+                    if isinstance(v, dict) and "raw_strength" in v
+                    else v
+                )
                 for k, v in strategy_signals.items()
+                if not k.startswith("_")
             },
             "ai_prediction": {
                 "signal": ai_sig["signal"],
@@ -362,6 +314,17 @@ def run_paper_trading(
                 "reasoning": ai_sig.get("metadata", {}).get("reasoning", ""),
             },
             "combined_decision": combined,
+            "indicators": (
+                {
+                    "ema_spread": ind.ema_spread,
+                    "rsi": ind.rsi_14,
+                    "macd_hist": ind.macd_hist,
+                    "atr": ind.atr_14,
+                    "atr_norm": ind.atr_norm_14,
+                }
+                if ind is not None
+                else {}
+            ),
             "risk_result": {
                 "approved": risk_result.approved,
                 "reasons": risk_result.reasons,
@@ -384,12 +347,20 @@ def run_paper_trading(
             "dataset": dataset_label,
         }
 
-        # --- Log proof ---
-        proof_hash = log_decision(decision_record)
-        proof_hashes.append(proof_hash)
+        mom_str = decision_record["strategy_signals"]["momentum"]["raw_strength"] if "momentum" in decision_record["strategy_signals"] else 0.0
+        mr_str = decision_record["strategy_signals"]["mean_reversion"]["raw_strength"] if "mean_reversion" in decision_record["strategy_signals"] else 0.0
+        ai_prob = decision_record["ai_prediction"]["confidence"]
+        conf_val = combined["confidence"]
+        action_val = combined["action"]
 
-        # --- Execute trade ---
+        print(f"Bar {idx}: Mom {mom_str:.3f} | MR {mr_str:.3f} | AI {ai_prob:.3f} | Conf {conf_val:.3f} | Action {action_val}")
+
+        # --- Execute trade and log proof ---
         if risk_result.approved and combined["action"] in ("BUY", "SELL"):
+            # Only log proofs for actual trades
+            proof_hash = log_decision(decision_record)
+            proof_hashes.append(proof_hash)
+
             size = risk_result.adjusted_size
             portfolio.cash -= size
 
@@ -445,6 +416,7 @@ def run_paper_trading(
         "losing_trades": len(trades) - win_count,
         "win_rate": round(win_count / len(trades) * 100, 1) if trades else 0,
         "proof_hashes_generated": len(proof_hashes),
+        "trades": trades,
     }
 
     logger.info("=" * 60)
@@ -535,7 +507,8 @@ def main():
                 len(df), df.index[0], df.index[-1])
 
     # Run simulation
-    summary = run_paper_trading(df)
+    dataset_label = Path(args.data).stem if args.data else "synthetic"
+    summary = run_paper_trading(df, dataset_label=dataset_label)
 
     # Print summary
     print("\n" + "=" * 60)

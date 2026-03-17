@@ -18,6 +18,7 @@ import pandas as pd
 
 from config import RiskConfig, CONFIG
 from utils.helpers import atr, sma, utc_now_iso
+from utils.indicators import compute_indicators
 
 logger = logging.getLogger(__name__)
 
@@ -77,10 +78,15 @@ def check_risk(
     warnings: list[str] = []
     adjusted_size = requested_size
 
+    ind = compute_indicators(df) if df is not None else None
+    atr_norm = ind.atr_norm_14 if ind is not None and ind.atr_norm_14 is not None else 0.0
+    atr_val = ind.atr_14 if ind is not None else None
+
     # --- 1. Minimum confidence ---
-    if confidence < cfg.min_confidence:
+    dyn_threshold = 0.65 if atr_norm > 1.2 else 0.45
+    if confidence < dyn_threshold:
         reasons.append(
-            f"Confidence {confidence:.3f} below minimum {cfg.min_confidence}"
+            f"Confidence {confidence:.3f} below dynamic min {dyn_threshold}"
         )
 
     # --- 2. Daily loss cap ---
@@ -122,25 +128,20 @@ def check_risk(
             )
             adjusted_size *= cfg.defensive_size_mult
 
-    # --- 6. Volatility filter ---
+    # --- 6. ATR-based sizing + volatility reduction (spec F) ---
     vol_adjustment = 1.0
-    if df is not None and len(df) >= 44:
-        vol_blocked, vol_warning = _check_volatility(df, cfg)
-        if vol_blocked:
-            reasons.append(vol_warning)
-        elif vol_warning:
-            warnings.append(vol_warning)
-            adjusted_size *= 0.5
-            vol_adjustment = 0.5
+    if atr_norm > cfg.atr_volatility_reduce_threshold:
+        warnings.append(f"ATR_norm high ({atr_norm:.2f}) — reducing size 50%")
+        vol_adjustment = 0.5
 
-    # --- 7. Confidence-based position sizing ---
-    # Replace fixed 20% with dynamic sizing
-    if adjusted_size > 0 and confidence > 0:
-        base_pct = 0.20
-        conf_factor = 0.5 + confidence  # [0.5, 1.5]
-        dynamic_size = portfolio.cash * base_pct * conf_factor * vol_adjustment
-        if dynamic_size < adjusted_size:
-            adjusted_size = dynamic_size
+    # Position size = 1.5% / (2 * atr_norm) , capped at 20%
+    if atr_norm > 0:
+        size_pct = 0.015 / (2.0 * atr_norm)
+        size_pct = min(size_pct, 0.20)
+        adjusted_size = portfolio.total_value * size_pct * vol_adjustment
+    else:
+        # If ATR not available, fall back to max_capital cap
+        adjusted_size = min(adjusted_size, portfolio.total_value * cfg.max_capital_pct) * vol_adjustment
 
     # --- 8. Cash check ---
     if adjusted_size > portfolio.cash:
@@ -150,23 +151,20 @@ def check_risk(
             )
         adjusted_size = min(adjusted_size, portfolio.cash)
 
-    # --- Calculate stop-loss / take-profit prices ---
-    sl_pct = cfg.stop_loss_pct
-    tp_pct = cfg.take_profit_pct
-
-    if cfg.use_dynamic_sl_tp and df is not None and {"high", "low"}.issubset(df.columns):
-        dynamic_sl, dynamic_tp = _compute_dynamic_sl_tp(df, entry_price, cfg)
-        if dynamic_sl > 0:
-            sl_pct = dynamic_sl
-        if dynamic_tp > 0:
-            tp_pct = dynamic_tp
+    # Calculate stop-loss / take-profit with 1.8 ATR SL and 3.2 ATR TP
+    if atr_val is not None and atr_val > 0:
+        sl_dist = 1.8 * atr_val
+        tp_dist = 3.2 * atr_val
+    else:
+        sl_dist = entry_price * cfg.stop_loss_pct
+        tp_dist = entry_price * cfg.take_profit_pct
 
     if signal == "BUY":
-        stop_loss_price = entry_price * (1 - sl_pct)
-        take_profit_price = entry_price * (1 + tp_pct)
+        stop_loss_price = entry_price - sl_dist
+        take_profit_price = entry_price + tp_dist
     elif signal == "SELL":
-        stop_loss_price = entry_price * (1 + sl_pct)
-        take_profit_price = entry_price * (1 - tp_pct)
+        stop_loss_price = entry_price + sl_dist
+        take_profit_price = entry_price - tp_dist
     else:
         stop_loss_price = 0.0
         take_profit_price = 0.0
@@ -180,15 +178,15 @@ def check_risk(
         stop_loss_price=round(stop_loss_price, 8),
         take_profit_price=round(take_profit_price, 8),
         warnings=warnings,
-        dynamic_sl_pct=round(sl_pct, 4),
-        dynamic_tp_pct=round(tp_pct, 4),
+        dynamic_sl_pct=0.0,
+        dynamic_tp_pct=0.0,
     )
 
     if approved:
         logger.info(
-            "Risk APPROVED: %s $%.0f @ %g | SL=%g (%.1f%%) TP=%g (%.1f%%) | warnings=%s",
+            "Risk APPROVED: %s $%.0f @ %g | SL=%g TP=%g | warnings=%s",
             signal, adjusted_size, entry_price,
-            stop_loss_price, sl_pct * 100, take_profit_price, tp_pct * 100,
+            stop_loss_price, take_profit_price,
             warnings or "none",
         )
     else:
@@ -203,30 +201,8 @@ def check_risk(
 def _compute_dynamic_sl_tp(
     df: pd.DataFrame, entry_price: float, cfg: RiskConfig
 ) -> tuple[float, float]:
-    """
-    Compute ATR-based dynamic stop-loss and take-profit percentages.
-
-    Returns:
-        (sl_pct, tp_pct) clamped to configured min/max bounds.
-    """
-    if len(df) < 15:
-        return 0.0, 0.0
-
-    close = df["close"]
-    atr_series = atr(df["high"], df["low"], close, 14)
-    atr_val = atr_series.iloc[-1]
-
-    if np.isnan(atr_val) or entry_price == 0:
-        return 0.0, 0.0
-
-    sl_pct = (atr_val * cfg.atr_sl_multiplier) / entry_price
-    tp_pct = (atr_val * cfg.atr_tp_multiplier) / entry_price
-
-    # Clamp to bounds
-    sl_pct = float(np.clip(sl_pct, cfg.min_sl_pct, cfg.max_sl_pct))
-    tp_pct = float(np.clip(tp_pct, cfg.min_tp_pct, cfg.max_tp_pct))
-
-    return sl_pct, tp_pct
+    # Legacy API kept for compatibility; ATR exits now handled directly in check_risk.
+    return 0.0, 0.0
 
 
 def check_trailing_stop(
@@ -287,35 +263,7 @@ def check_trailing_stop(
 def _check_volatility(
     df: pd.DataFrame, cfg: RiskConfig
 ) -> tuple[bool, str]:
-    """
-    Check if current volatility exceeds the threshold.
-
-    Returns:
-        (blocked, message) — blocked=True means trade should be rejected.
-    """
-    close = df["close"]
-    # Current 14-day realized vol vs 30-day average vol
-    returns = close.pct_change().dropna()
-    if len(returns) < 30:
-        return False, ""
-
-    recent_vol = returns.iloc[-14:].std() * np.sqrt(252)  # annualized
-    avg_vol = returns.iloc[-30:].std() * np.sqrt(252)
-
-    if avg_vol == 0:
-        return False, ""
-
-    vol_ratio = recent_vol / avg_vol
-
-    if vol_ratio > cfg.volatility_threshold:
-        return True, (
-            f"Volatility too high: {vol_ratio:.2f}x average "
-            f"(threshold {cfg.volatility_threshold:.1f}x)"
-        )
-    elif vol_ratio > cfg.volatility_threshold * 0.75:
-        return False, (
-            f"Elevated volatility: {vol_ratio:.2f}x average — reducing size"
-        )
+    # Legacy API kept for compatibility; ATR_norm reduction is handled in check_risk.
     return False, ""
 
 

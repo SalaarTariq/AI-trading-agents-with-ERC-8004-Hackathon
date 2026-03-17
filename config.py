@@ -26,15 +26,22 @@ class PortfolioConfig:
 @dataclass
 class RiskConfig:
     """Risk management thresholds."""
-    stop_loss_pct: float = 0.04          # 4% default stop-loss per trade
-    take_profit_pct: float = 0.06        # 6% default take-profit per trade
+    # Legacy fixed-percentage fields (kept for compatibility with tests / callers)
+    stop_loss_pct: float = 0.04           # 4% default stop-loss per trade
+    take_profit_pct: float = 0.06         # 6% default take-profit per trade
+
+    # ATR-based execution sizing / exits (spec F)
+    atr_sl_mult: float = 2.0
+    atr_tp_mult: float = 3.0
+    risk_per_trade_pct: float = 0.02     # 2% risk per trade
+    max_capital_pct: float = 0.25        # 25% max capital allocation per trade
     max_position_pct: float = 0.30       # 30% max of portfolio per position
     daily_loss_cap_pct: float = 0.10     # 10% daily loss cap
     max_drawdown_pct: float = 0.15       # 15% drawdown triggers defensive mode
     defensive_size_mult: float = 0.25    # 75% reduction in defensive mode
-    volatility_threshold: float = 2.0    # Skip if vol > 2x 30-day avg
+    atr_volatility_reduce_threshold: float = 2.0  # ATR_norm > this reduces size (not block)
     consecutive_loss_pause: int = 3      # Pause after N consecutive stop-losses
-    min_confidence: float = 0.55         # Minimum combined confidence to trade
+    min_confidence: float = 0.60         # Minimum combined confidence to trade
     # Dynamic SL/TP (ATR-based)
     use_dynamic_sl_tp: bool = True       # Enable ATR-based SL/TP
     atr_sl_multiplier: float = 2.0       # SL = ATR * this
@@ -52,8 +59,8 @@ class RiskConfig:
 @dataclass
 class MomentumConfig:
     """Momentum strategy parameters."""
-    fast_period: int = 12
-    slow_period: int = 26
+    ema_fast_period: int = 9
+    ema_slow_period: int = 21
     volume_ma_period: int = 20
     signal_threshold: float = 0.01       # Min crossover spread to trigger signal
     # MACD confirmation
@@ -76,6 +83,7 @@ class MeanReversionConfig:
     rsi_period: int = 14
     rsi_oversold: float = 35.0           # Widened from 30
     rsi_overbought: float = 65.0         # Widened from 70
+    ema_spread_ranging_threshold: float = 0.0  # if 0, derived as 0.2% of ema_slow
     # 2-of-N condition logic
     min_conditions: int = 2              # Min conditions to trigger (out of 4)
     # Stochastic confirmer
@@ -137,6 +145,7 @@ class SignalConfig:
     signal_threshold: float = 0.20       # Min score to trigger BUY/SELL (raised from 0.12)
     min_agreement: int = 2               # Min strategies agreeing on direction
     use_regime_detection: bool = True
+    execute_confidence_threshold: float = 0.60  # Minimum combined confidence to execute
 
 
 @dataclass

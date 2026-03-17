@@ -75,13 +75,14 @@ def log_decision(
     log_path = Path(log_path or CONFIG.proof_log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    proof_hash = generate_proof_hash(decision_record)
+    full_record = _build_full_record(decision_record)
+    proof_hash = generate_proof_hash(full_record)
 
     entry = {
         "proof_hash": proof_hash,
         "timestamp": utc_now_iso(),
-        "decision_summary": _summarize(decision_record),
-        "full_record": decision_record,
+        "decision_summary": _summarize(full_record),
+        "full_record": full_record,
     }
 
     with open(log_path, "a", encoding="utf-8") as f:
@@ -168,7 +169,11 @@ def verify_log_integrity(log_path: str | Path | None = None) -> dict:
 
 def _summarize(record: dict) -> str:
     """Create a one-line human-readable summary of a decision record."""
+    # Support both legacy shape (final_decision at top-level)
+    # and ERC-8004 wrapper shape (decision.final_decision).
     decision = record.get("final_decision", {})
+    if not decision and isinstance(record.get("decision"), dict):
+        decision = record["decision"].get("final_decision", {}) or {}
     action = decision.get("action", "UNKNOWN")
     pair = decision.get("pair", "?")
     price = decision.get("entry_price", 0)
@@ -177,3 +182,66 @@ def _summarize(record: dict) -> str:
     if action in ("BUY", "SELL"):
         return f"{action} {pair} @ ${price:,.2f} (size ${size:,.0f})"
     return f"HOLD {pair} — no action"
+
+
+def _build_full_record(decision_record: dict) -> dict:
+    """
+    Build an ERC-8004-aligned record wrapper around the raw decision record.
+
+    The wrapper is deterministic (derived from decision_record only) so the
+    proof hash is stable for the same decision inputs.
+    """
+    pair = decision_record.get("pair") or decision_record.get("final_decision", {}).get("pair") or "?"
+    dataset = decision_record.get("dataset", "")
+
+    # Identity registry (deterministic)
+    identity = {
+        "agent_id": "balanced_hybrid_ai_trading_agent",
+        "strategy_version": "v2_confidence_weighted",
+        "pair": pair,
+        "dataset": dataset,
+    }
+
+    # Reputation snapshot (best-effort; still deterministic)
+    ps = decision_record.get("portfolio_state", {}) if isinstance(decision_record.get("portfolio_state"), dict) else {}
+    reputation = {
+        "portfolio_value": ps.get("total_value", None),
+        "cash": ps.get("cash", None),
+        "daily_pnl": ps.get("daily_pnl", None),
+        "sample_count": None,
+        "rolling_win_rate": None,
+        "max_drawdown": None,
+    }
+
+    rr = decision_record.get("risk_result", {}) if isinstance(decision_record.get("risk_result"), dict) else {}
+    fd = decision_record.get("final_decision", {}) if isinstance(decision_record.get("final_decision"), dict) else {}
+    intent = {
+        "timestamp": decision_record.get("timestamp", ""),
+        "pair": pair,
+        "action": fd.get("action", "HOLD"),
+        "entry_price": fd.get("entry_price", None),
+        "size": fd.get("size", 0),
+        "stop_loss": rr.get("stop_loss", None),
+        "take_profit": rr.get("take_profit", None),
+        "reasons": rr.get("reasons", []),
+        "warnings": rr.get("warnings", []),
+        "confidence": decision_record.get("combined_decision", {}).get("confidence", None)
+        if isinstance(decision_record.get("combined_decision"), dict)
+        else None,
+        "indicators": decision_record.get("indicators", {}),
+        "risk_pass_fail": rr.get("approved", False),
+    }
+
+    inputs_digest = generate_proof_hash(decision_record)
+    validation = {
+        "hash_algo": "sha256",
+        "inputs_digest": inputs_digest,
+    }
+
+    return {
+        "identity": identity,
+        "reputation": reputation,
+        "intent": intent,
+        "validation": validation,
+        "decision": decision_record,
+    }

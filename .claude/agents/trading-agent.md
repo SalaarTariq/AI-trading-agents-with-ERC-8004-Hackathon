@@ -14,6 +14,11 @@ The Hybrid Trading Agent is the top-level coordinator that orchestrates all skil
 - Use **build-dashboard** to create real-time visualizations of trading activity
 - Use **write-unit-tests** to verify correctness of all modules
 - Use **validate-logic** to log and verify all trade decisions with proof hashes
+- Use **indicator_analysis** to simplify contradictory indicators into a coherent set
+- Use **confidence_scoring** to combine signals with a calibrated execution threshold
+- Use **risk_management** to align risk gating with confidence and volatility
+- Use **trade_execution** to ensure deterministic paper-trade lifecycle + logging
+- Use **logging_validation** to structure ERC-8004-style registries and hashes
 
 ## Decision Making Process
 
@@ -22,12 +27,11 @@ The agent makes decisions by combining AI and rule-based reasoning:
 1. **Data Ingestion**: Load market data from historical CSV files or sandbox APIs
 2. **Signal Generation**: Run all strategy modules independently:
    - Momentum: trend-following based on moving average crossovers
-   - Mean Reversion: deviation-based trading using Bollinger Bands and z-scores
+   - Mean Reversion: deviation-based trading using Bollinger Bands and RSI (only in weak trend)
    - Yield Optimizer: evaluate yield opportunities across protocols
-3. **AI Ensemble**: The AI predictor weighs all strategy signals based on:
-   - Recent accuracy of each strategy
-   - Current market regime (trending vs. ranging)
-   - Correlation between signals (agreement boosts confidence)
+3. **Confidence Scoring**: Combine signals with dynamic weights and an execution gate:
+   - Regime-adaptive weights (trending vs. ranging vs. volatile)
+   - Execute only if combined confidence exceeds threshold (default 0.60)
 4. **Risk Gating**: Every proposed trade must pass the risk manager:
    - Stop-loss and take-profit limits
    - Position size constraints
@@ -46,8 +50,8 @@ The agent makes decisions by combining AI and rule-based reasoning:
 
 ## Integration Points
 
-- Reads configuration from `config/config.yaml`
-- Writes trade history to `simulation/` logs
+- Reads configuration from `config.py`
+- Writes trade history to `data/trade_history.jsonl`
 - Writes proof hashes to `validation/proof_log.jsonl`
 - Feeds data to `dashboard/dashboard.py` for visualization
 

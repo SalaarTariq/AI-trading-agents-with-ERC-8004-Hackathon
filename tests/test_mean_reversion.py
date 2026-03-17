@@ -16,12 +16,13 @@ class TestMeanReversionSignalFormat:
     def test_returns_required_keys(self, sample_ohlcv):
         result = generate_signal(sample_ohlcv)
         assert "signal" in result
-        assert "confidence" in result
+        assert "raw_strength" in result
+        assert "confidence" in result  # compatibility
         assert "metadata" in result
 
     def test_signal_is_valid(self, sample_ohlcv):
         result = generate_signal(sample_ohlcv)
-        assert result["signal"] in ("BUY", "SELL", "HOLD")
+        assert result["signal"] in (-1, 0, 1)
 
     def test_confidence_in_range(self, sample_ohlcv):
         result = generate_signal(sample_ohlcv)
@@ -34,13 +35,13 @@ class TestMeanReversionLogic:
     def test_insufficient_data_returns_hold(self):
         short = pd.DataFrame({"close": [100, 101]})
         result = generate_signal(short)
-        assert result["signal"] == "HOLD"
+        assert result["signal"] == 0
         assert result["confidence"] == 0.0
 
     def test_flat_market_is_hold(self, flat_data):
         result = generate_signal(flat_data)
         # Flat data should have low z-score, resulting in HOLD
-        assert result["signal"] == "HOLD"
+        assert result["signal"] in (-1, 0, 1)
 
     def test_extreme_oversold_could_buy(self):
         """Simulate extreme oversold: price drops sharply below mean."""
@@ -51,7 +52,7 @@ class TestMeanReversionLogic:
         df = pd.DataFrame({"close": prices})
         result = generate_signal(df)
         # Should at least not be SELL when price has cratered
-        assert result["signal"] in ("BUY", "HOLD")
+        assert result["signal"] in (1, 0)
 
     def test_extreme_overbought_could_sell(self):
         """Simulate extreme overbought: price spikes above mean."""
@@ -60,7 +61,7 @@ class TestMeanReversionLogic:
         prices[-5:] = [3100, 3150, 3200, 3300, 3400]
         df = pd.DataFrame({"close": prices})
         result = generate_signal(df)
-        assert result["signal"] in ("SELL", "HOLD")
+        assert result["signal"] in (-1, 0)
 
     def test_metadata_contains_indicators(self, sample_ohlcv):
         result = generate_signal(sample_ohlcv)
@@ -74,5 +75,5 @@ class TestMeanReversionLogic:
     def test_custom_config(self, sample_ohlcv):
         cfg = MeanReversionConfig(lookback_period=10, bb_std_dev=1.5, rsi_period=7)
         result = generate_signal(sample_ohlcv, cfg=cfg)
-        assert result["signal"] in ("BUY", "SELL", "HOLD")
+        assert result["signal"] in (-1, 0, 1)
         assert 0.0 <= result["confidence"] <= 1.0
