@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from config import AppConfig, RiskConfig, MomentumConfig, MeanReversionConfig
+from config import AppConfig, RiskConfig, MomentumConfig, MeanReversionConfig, RegimeConfig
 from risk.risk_manager import PortfolioState
 
 

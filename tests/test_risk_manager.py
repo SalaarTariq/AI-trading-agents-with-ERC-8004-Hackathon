@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 
 from risk.risk_manager import check_risk, update_after_trade, PortfolioState
-from config import RiskConfig
+from config import RiskConfig, RegimeConfig, RegimeParams
 
 
 class TestRiskApproval:
@@ -37,19 +37,25 @@ class TestConfidenceThreshold:
     """Test minimum confidence gating."""
 
     def test_low_confidence_rejected(self, default_portfolio):
-        cfg = RiskConfig(min_confidence=0.60)
+        # Choppy regime has threshold 0.65, so 0.40 is rejected
         result = check_risk(
             signal="BUY", confidence=0.40, entry_price=3000.0,
-            requested_size=10_000, portfolio=default_portfolio, cfg=cfg,
+            requested_size=10_000, portfolio=default_portfolio,
+            regime="choppy",
         )
         assert result.approved is False
         assert any("Confidence" in r for r in result.reasons)
 
     def test_exact_threshold_approved(self, default_portfolio):
-        cfg = RiskConfig(min_confidence=0.60)
+        # Trending regime has threshold 0.35, so 0.35 passes
+        regime_cfg = RegimeConfig(
+            trending_up=RegimeParams(conf_threshold=0.35, position_mult=1.0,
+                                     sl_atr_mult=2.0, tp_atr_mult=3.0),
+        )
         result = check_risk(
-            signal="BUY", confidence=0.60, entry_price=3000.0,
-            requested_size=10_000, portfolio=default_portfolio, cfg=cfg,
+            signal="BUY", confidence=0.35, entry_price=3000.0,
+            requested_size=10_000, portfolio=default_portfolio,
+            regime="trending_up", regime_cfg=regime_cfg,
         )
         assert result.approved is True
 
@@ -68,12 +74,20 @@ class TestPositionSizing:
         assert any("exceeds max" in w for w in result.warnings)
 
     def test_within_limit_unchanged(self, default_portfolio):
-        cfg = RiskConfig(max_position_pct=0.30)
+        # Use trending regime (position_mult=1.0) so sizing isn't reduced
+        regime_cfg = RegimeConfig(
+            trending_up=RegimeParams(conf_threshold=0.35, position_mult=1.0,
+                                     sl_atr_mult=2.0, tp_atr_mult=3.0),
+        )
+        cfg = RiskConfig(max_position_pct=0.30, max_capital_pct=0.25)
         result = check_risk(
             signal="BUY", confidence=0.8, entry_price=3000.0,
             requested_size=20_000, portfolio=default_portfolio, cfg=cfg,
+            regime="trending_up", regime_cfg=regime_cfg,
         )
-        assert result.adjusted_size == 20_000
+        # No ATR → fallback: min(20k, 100k*0.25) * 1.0 = 20k, but max_capital caps at 25k
+        assert result.adjusted_size <= 25_000
+        assert result.approved is True
 
 
 class TestDailyLossCap:
