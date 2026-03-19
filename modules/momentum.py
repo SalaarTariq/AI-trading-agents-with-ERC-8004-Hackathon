@@ -25,7 +25,6 @@ import numpy as np
 import pandas as pd
 
 from config import MomentumConfig, CONFIG
-from utils.helpers import normalize_confidence
 from utils.indicators import compute_indicators
 
 logger = logging.getLogger(__name__)

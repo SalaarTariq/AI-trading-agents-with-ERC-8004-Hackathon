@@ -1,12 +1,9 @@
 """
-modules/confidence_scoring.py — Confidence scoring (spec E).
+modules/confidence_scoring.py — Confidence scoring.
 
-Implements:
-    def compute_confidence(momentum_out, mean_rev_out, ai_out, current_atr_norm):
-        base = 0.45 * momentum_out.strength + 0.25 * mean_rev_out.strength + 0.30 * ai_out.prob
-        if current_atr_norm > 1.5: base *= 0.7
-        confidence = clamp(base, 0, 1)
-        return confidence, action
+Combines momentum, mean-reversion, and indicator agreement signals
+into a single confidence score and action. No tanh squashing.
+Regime-aware threshold is passed in from caller.
 """
 
 from __future__ import annotations
@@ -20,19 +17,26 @@ def compute_confidence(
     ai_out: dict,
     current_atr_norm: float | None,
     *,
-    ai_weight: float = 0.30,
-    ai_weight_low_acc: float = 0.15,
-    ai_max_weight_cap: float = 0.35,
-    ai_min_rolling_acc: float = 0.52,
+    conf_threshold: float = 0.45,
+    w_mom: float = 0.45,
+    w_mr: float = 0.30,
+    w_ai: float = 0.25,
 ) -> tuple[float, str]:
     """
     Compute combined confidence and action.
 
-    momentum_out / mean_rev_out:
-        expected keys: signal (-1|0|1), raw_strength (0..1)
+    Args:
+        momentum_out: {signal: -1|0|1, raw_strength: 0..1}
+        mean_rev_out: {signal: -1|0|1, raw_strength: 0..1}
+        ai_out: {prob_up: 0..1}
+        current_atr_norm: Normalized ATR (unused now, kept for API compat).
+        conf_threshold: Minimum absolute score to trigger BUY/SELL.
+        w_mom: Weight for momentum signal.
+        w_mr: Weight for mean-reversion signal.
+        w_ai: Weight for AI/indicator agreement signal.
 
-    ai_out:
-        expected keys: prob_up (0..1), rolling_accuracy (0..1)
+    Returns:
+        (confidence, action) where confidence is in [0, 1].
     """
     m_sig = int(momentum_out.get("signal", 0))
     m_str = float(momentum_out.get("raw_strength", 0.0))
@@ -40,52 +44,24 @@ def compute_confidence(
     r_str = float(mean_rev_out.get("raw_strength", 0.0))
 
     prob_up = float(ai_out.get("prob_up", 0.5))
-    ai_acc = ai_out.get("rolling_accuracy", None)
-    ai_acc_v = float(ai_acc) if isinstance(ai_acc, (int, float)) else None
 
-    # Determine action by directional agreement (prefer momentum when both fire)
-    direction = 0
-    if m_sig != 0 and r_sig != 0:
-        direction = m_sig if m_sig == r_sig else 0
-    elif m_sig != 0:
-        direction = m_sig
-    elif r_sig != 0:
-        direction = r_sig
-
-    action = "HOLD"
-    if direction == 1:
-        action = "BUY"
-    elif direction == -1:
-        action = "SELL"
-
-    # AI weight rule (spec D) - keep signature parameters
-    w_ai = 0.2
-
-    # Momentum and mean reversion directional strengths
+    # Directional values: [-1, 1]
     m_val = m_sig * m_str
     r_val = r_sig * r_str
+    ai_val = (prob_up - 0.5) * 2.0  # map [0,1] → [-1,1]
 
-    # AI contribution: scale prob_up to [-1, 1]
-    ai_val = (prob_up - 0.5) * 2.0
+    # Weighted sum: [-1, 1]
+    raw_score = w_mom * m_val + w_mr * r_val + w_ai * ai_val
 
-    # Combine signals
-    conf_raw = 0.5 * m_val + 0.3 * r_val + w_ai * ai_val
-    conf_squashed = np.tanh(conf_raw * 3.0)
-    conf_scaled = (conf_squashed + 1) / 2.0  # mapped to [0, 1] for scaling logic if we want positive scale
-    
-    # Dynamic threshold
-    atr_val = current_atr_norm if current_atr_norm is not None else 0.0
-    threshold = 0.65 if atr_val > 1.2 else 0.45
+    # Confidence = absolute magnitude
+    confidence = float(np.clip(abs(raw_score), 0.0, 1.0))
 
-    if conf_squashed > threshold:
+    if raw_score > conf_threshold:
         action = "BUY"
-        confidence = conf_scaled
-    elif conf_squashed < -threshold:
+    elif raw_score < -conf_threshold:
         action = "SELL"
-        confidence = 1.0 - conf_scaled
     else:
         action = "HOLD"
         confidence = 0.0
 
     return confidence, action
-

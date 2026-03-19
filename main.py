@@ -1,23 +1,14 @@
 """
 main.py — Entry point for the Balanced Hybrid AI Trading Agent.
 
-
 Orchestrates all modules: loads market data, runs strategy modules,
-combines signals via AI predictor, validates through risk manager,
+combines signals via rule-based scorer, validates through risk manager,
 executes paper trades, and logs proof hashes.
 
 Usage:
-    # Run paper trading simulation on synthetic data
     python main.py
-
-    # Run on a specific CSV file
     python main.py --data data/historical_prices.csv
-
-    # Run with debug logging
     python main.py --log-level DEBUG
-
-    # Launch the dashboard (separate terminal)
-    streamlit run dashboard/dashboard.py
 """
 
 from __future__ import annotations
@@ -25,99 +16,69 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from config import CONFIG, AppConfig
-from utils.helpers import setup_logging, utc_now_iso, adx, bollinger_bands
+from utils.helpers import setup_logging, ema, atr
 from utils.data_loader import load_or_generate
 from modules.momentum import generate_signal as momentum_signal
 from modules.mean_reversion import generate_signal as mean_reversion_signal
-from modules.yield_optimizer import generate_signal as yield_signal
 from modules.ai_predictor import generate_signal_from_strategy_outputs
 from modules.confidence_scoring import compute_confidence
 from utils.indicators import compute_indicators
 from risk.risk_manager import (
-    check_risk, update_after_trade, check_trailing_stop, PortfolioState,
+    check_risk, update_after_trade, check_trailing_stop, PortfolioState, RiskResult,
 )
 from validation.proof_logger import log_decision
 
 logger = logging.getLogger(__name__)
 
-# Trade history log path
 TRADE_LOG = Path("data/trade_history.jsonl")
 
 
 def detect_regime(df: pd.DataFrame) -> str:
     """
-    Detect current market regime using ADX and Bollinger Band width.
+    Detect current market regime using EMA spread and ATR.
 
     Returns:
-        One of "trending_up", "trending_down", "ranging", "volatile".
+        One of "trending_up", "trending_down", "choppy".
     """
+    if len(df) < 30 or "close" not in df.columns:
+        return "choppy"
+
     close = df["close"]
+    current_price = float(close.iloc[-1])
+    if current_price == 0:
+        return "choppy"
 
-    if len(df) < 30 or not {"high", "low"}.issubset(df.columns):
-        return "ranging"  # Default when insufficient data
+    ema9 = ema(close, 9)
+    ema21 = ema(close, 21)
+    spread = float((ema9.iloc[-1] - ema21.iloc[-1]) / current_price)
 
-    adx_series = adx(df["high"], df["low"], close, 14)
-    adx_val = adx_series.iloc[-1]
+    atr_norm = 0.0
+    if {"high", "low"}.issubset(df.columns):
+        atr_series = atr(df["high"], df["low"], close, 14)
+        atr_val = float(atr_series.iloc[-1])
+        if not np.isnan(atr_val):
+            atr_norm = atr_val / current_price
 
-    _, upper, lower = bollinger_bands(close, 20, 2.0)
-    bb_width = ((upper - lower) / close).iloc[-1] if close.iloc[-1] > 0 else 0.0
-
-    # High volatility: BB width > 6%
-    if bb_width > 0.06:
-        return "volatile"
-
-    # Strong trend: ADX > 25
-    if not np.isnan(adx_val) and adx_val > 25:
-        # Determine direction by recent returns
-        ret_10d = close.pct_change(10).iloc[-1] if len(close) > 10 else 0
-        if ret_10d > 0:
-            return "trending_up"
-        else:
-            return "trending_down"
-
-    return "ranging"
-
-
-def _get_regime_weights(regime: str, cfg: AppConfig) -> dict[str, float]:
-    """Get strategy weights based on current market regime."""
-    rw = cfg.regime_weights
-    if regime.startswith("trending"):
-        return {
-            "momentum": rw.trending_momentum,
-            "mean_reversion": rw.trending_mean_reversion,
-            "ai_predictor": rw.trending_ai,
-        }
-    elif regime == "volatile":
-        return {
-            "momentum": rw.volatile_momentum,
-            "mean_reversion": rw.volatile_mean_reversion,
-            "ai_predictor": rw.volatile_ai,
-        }
-    else:  # ranging
-        return {
-            "momentum": rw.ranging_momentum,
-            "mean_reversion": rw.ranging_mean_reversion,
-            "ai_predictor": rw.ranging_ai,
-        }
+    if spread > 0.005 and atr_norm < 0.03:
+        return "trending_up"
+    if spread < -0.005 and atr_norm < 0.03:
+        return "trending_down"
+    return "choppy"
 
 
 def combine_signals(
     strategy_signals: dict[str, dict],
     cfg: AppConfig | None = None,
-    regime: str = "ranging",
+    regime: str = "choppy",
 ) -> dict:
     """
-    Combine strategy signals (spec E).
-
-    - Computes a confidence score and action using `compute_confidence`
-    - Enforces execution threshold in `main.py` call site (downstream)
+    Combine strategy signals using regime-aware confidence scoring.
     """
     cfg = cfg or CONFIG
 
@@ -125,19 +86,14 @@ def combine_signals(
     mr = strategy_signals.get("mean_reversion", {"signal": 0, "raw_strength": 0.0})
     ai = strategy_signals.get("ai_ensemble", {"prob_up": 0.5, "rolling_accuracy": None})
 
-    atr_norm = None
-    if isinstance(strategy_signals.get("_atr_norm"), (int, float)):
-        atr_norm = float(strategy_signals["_atr_norm"])
+    rp = cfg.regime.get(regime)
 
     conf, action = compute_confidence(
-        mom,
-        mr,
-        ai,
-        atr_norm,
-        ai_weight=0.30,
-        ai_weight_low_acc=0.15,
-        ai_max_weight_cap=0.35,
-        ai_min_rolling_acc=0.52,
+        mom, mr, ai, None,
+        conf_threshold=rp.conf_threshold,
+        w_mom=cfg.weights.momentum,
+        w_mr=cfg.weights.mean_reversion,
+        w_ai=cfg.weights.indicator_agreement,
     )
 
     details = {
@@ -147,7 +103,6 @@ def combine_signals(
             "prob_up": round(float(ai.get("prob_up", 0.5)), 4),
             "rolling_accuracy": ai.get("rolling_accuracy", None),
         },
-        "atr_norm": atr_norm,
     }
 
     return {
@@ -156,8 +111,8 @@ def combine_signals(
         "score": round(float(conf), 4),
         "details": details,
         "regime": regime,
-        "buy_agreement": int((mom.get("signal", 0) == 1)) + int((mr.get("signal", 0) == 1)),
-        "sell_agreement": int((mom.get("signal", 0) == -1)) + int((mr.get("signal", 0) == -1)),
+        "buy_agreement": int(mom.get("signal", 0) == 1) + int(mr.get("signal", 0) == 1),
+        "sell_agreement": int(mom.get("signal", 0) == -1) + int(mr.get("signal", 0) == -1),
     }
 
 
@@ -170,21 +125,17 @@ def run_paper_trading(
     """
     Run a paper-trading simulation over historical data.
 
-    Iterates through each bar (after warmup period), generates signals
-    from all modules, combines them, checks risk, executes paper trades,
-    and logs proof hashes.
-
     Args:
         df: OHLCV DataFrame.
         cfg: App config.
         warmup: Number of initial bars to skip (for indicator warm-up).
+        dataset_label: Label for the dataset in logs.
 
     Returns:
         Summary dict with PnL, trade count, and proof hashes.
     """
     cfg = cfg or CONFIG
 
-    # Initialize portfolio
     portfolio = PortfolioState(
         total_value=cfg.portfolio.initial_balance,
         cash=cfg.portfolio.initial_balance,
@@ -195,7 +146,6 @@ def run_paper_trading(
     proof_hashes: list[str] = []
     pair = cfg.portfolio.trading_pairs[0] if cfg.portfolio.trading_pairs else "ETH/USDC"
 
-    # Ensure trade log directory exists
     TRADE_LOG.parent.mkdir(parents=True, exist_ok=True)
 
     total_bars = len(df)
@@ -204,17 +154,14 @@ def run_paper_trading(
         total_bars, warmup, pair, portfolio.total_value,
     )
 
-    open_position: dict | None = None  # Track one open position at a time
+    open_position: dict | None = None
 
     for i in range(warmup, total_bars):
-        window = df.iloc[:i + 1]  # All data up to current bar
+        window = df.iloc[:i + 1]
         current_price = window["close"].iloc[-1]
         timestamp = str(window.index[-1])
 
-        idx = window.index[-1]
-
-
-        # --- Update trailing stop and check if open position hits SL/TP ---
+        # --- Update trailing stop and check exit ---
         if open_position:
             open_position = check_trailing_stop(open_position, current_price, cfg.risk)
             high = window["high"].iloc[-1]
@@ -243,11 +190,9 @@ def run_paper_trading(
                 )
                 open_position = None
 
-        # --- Skip if we already have an open position ---
         if open_position:
             continue
 
-        # --- Decrement cooldown timer ---
         if portfolio.cooldown_bars > 0:
             portfolio.cooldown_bars -= 1
 
@@ -256,21 +201,14 @@ def run_paper_trading(
         mr_sig = mean_reversion_signal(window, cfg.mean_reversion)
 
         ind = compute_indicators(window)
-        atr_norm = ind.atr_norm_14 if ind is not None else None
 
         strategy_signals = {
             "momentum": mom_sig,
             "mean_reversion": mr_sig,
-            "_atr_norm": atr_norm,
         }
 
-        # Only include yield optimizer if weight > 0
-        if cfg.weights.yield_optimizer > 0:
-            yld_sig = yield_signal(window, portfolio_value=portfolio.total_value, cfg=cfg.yield_opt)
-            strategy_signals["yield_optimizer"] = yld_sig
-
-        # --- AI ensemble prediction ---
-        ai_sig = generate_signal_from_strategy_outputs(strategy_signals, window, cfg.ai)
+        # --- Rule-based scorer ---
+        ai_sig = generate_signal_from_strategy_outputs(strategy_signals, window)
         strategy_signals["ai_ensemble"] = ai_sig
 
         # --- Detect regime ---
@@ -279,9 +217,9 @@ def run_paper_trading(
         # --- Combine all signals ---
         combined = combine_signals(strategy_signals, cfg, regime=regime)
 
-        # --- Risk check ---
+        # --- Risk check with regime ---
         if combined["action"] in ("BUY", "SELL"):
-            requested_size = portfolio.cash * 0.2  # 20% of available cash per trade
+            requested_size = portfolio.cash * 0.2
             risk_result = check_risk(
                 signal=combined["action"],
                 confidence=combined["confidence"],
@@ -290,9 +228,17 @@ def run_paper_trading(
                 portfolio=portfolio,
                 df=window,
                 cfg=cfg.risk,
+                regime=regime,
+                regime_cfg=cfg.regime,
             )
         else:
-            risk_result = _skip_risk_result()
+            risk_result = RiskResult(
+                approved=False,
+                reasons=["Signal is HOLD — no trade"],
+                adjusted_size=0.0,
+                stop_loss_price=0.0,
+                take_profit_price=0.0,
+            )
 
         # --- Build decision record ---
         decision_record = {
@@ -306,7 +252,6 @@ def run_paper_trading(
                     else v
                 )
                 for k, v in strategy_signals.items()
-                if not k.startswith("_")
             },
             "ai_prediction": {
                 "signal": ai_sig["signal"],
@@ -347,17 +292,8 @@ def run_paper_trading(
             "dataset": dataset_label,
         }
 
-        mom_str = decision_record["strategy_signals"]["momentum"]["raw_strength"] if "momentum" in decision_record["strategy_signals"] else 0.0
-        mr_str = decision_record["strategy_signals"]["mean_reversion"]["raw_strength"] if "mean_reversion" in decision_record["strategy_signals"] else 0.0
-        ai_prob = decision_record["ai_prediction"]["confidence"]
-        conf_val = combined["confidence"]
-        action_val = combined["action"]
-
-        print(f"Bar {idx}: Mom {mom_str:.3f} | MR {mr_str:.3f} | AI {ai_prob:.3f} | Conf {conf_val:.3f} | Action {action_val}")
-
         # --- Execute trade and log proof ---
         if risk_result.approved and combined["action"] in ("BUY", "SELL"):
-            # Only log proofs for actual trades
             proof_hash = log_decision(decision_record)
             proof_hashes.append(proof_hash)
 
@@ -377,9 +313,9 @@ def run_paper_trading(
             }
 
             logger.info(
-                "Opened %s %s @ %g size=$%.0f (SL=%g TP=%g)",
+                "Opened %s %s @ %g size=$%.0f (SL=%g TP=%g) regime=%s",
                 combined["action"], pair, current_price, size,
-                risk_result.stop_loss_price, risk_result.take_profit_price,
+                risk_result.stop_loss_price, risk_result.take_profit_price, regime,
             )
 
     # --- Close any remaining position at last price ---
@@ -440,32 +376,16 @@ def _check_exit(
 
     if position["action"] == "BUY":
         if low <= sl:
-            pnl = (sl - entry) / entry * size
-            return True, pnl
+            return True, (sl - entry) / entry * size
         if high >= tp:
-            pnl = (tp - entry) / entry * size
-            return True, pnl
+            return True, (tp - entry) / entry * size
     elif position["action"] == "SELL":
         if high >= sl:
-            pnl = (entry - sl) / entry * size
-            return True, pnl
+            return True, (entry - sl) / entry * size
         if low <= tp:
-            pnl = (entry - tp) / entry * size
-            return True, pnl
+            return True, (entry - tp) / entry * size
 
     return False, 0.0
-
-
-def _skip_risk_result():
-    """Return a dummy risk result for HOLD signals."""
-    from risk.risk_manager import RiskResult
-    return RiskResult(
-        approved=False,
-        reasons=["Signal is HOLD — no trade"],
-        adjusted_size=0.0,
-        stop_loss_price=0.0,
-        take_profit_price=0.0,
-    )
 
 
 def _append_trade_log(trade: dict) -> None:
@@ -501,16 +421,13 @@ def main():
     logger.info("Balanced Hybrid AI Trading Agent")
     logger.info("=" * 60)
 
-    # Load data
     df = load_or_generate(args.data, days=args.days)
     logger.info("Data loaded: %d rows, range %s to %s",
                 len(df), df.index[0], df.index[-1])
 
-    # Run simulation
     dataset_label = Path(args.data).stem if args.data else "synthetic"
     summary = run_paper_trading(df, dataset_label=dataset_label)
 
-    # Print summary
     print("\n" + "=" * 60)
     print("PAPER TRADING SUMMARY")
     print("=" * 60)

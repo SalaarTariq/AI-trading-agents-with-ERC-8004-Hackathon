@@ -28,6 +28,7 @@ The agent makes decisions by combining AI and rule-based reasoning:
 2. **Signal Generation**: Run all strategy modules independently:
    - Momentum: trend-following based on moving average crossovers
    - Mean Reversion: deviation-based trading using Bollinger Bands and RSI (only in weak trend)
+   - **Deep Learning (GRU)**: Pre-trained PyTorch model predicts Buy/Hold/Sell with confidence from OHLCV sequences
    - Yield Optimizer: evaluate yield opportunities across protocols
 3. **Confidence Scoring**: Combine signals with dynamic weights and an execution gate:
    - Regime-adaptive weights (trending vs. ranging vs. volatile)
@@ -58,15 +59,24 @@ The agent makes decisions by combining AI and rule-based reasoning:
 ## Usage
 
 ```bash
-# Run the full agent
+# 1. Merge and preprocess data
+python -m data_processing.merge_datasets
+
+# 2a. Fast train (debug/test, ~1M samples, 5 symbols)
+python -m model_training.train --fast-train --epochs 10
+
+# 2b. Full train (50 symbols, ~10M samples)
+python -m model_training.train --epochs 30
+
+# 3. Run the full agent (uses trained model automatically)
 python main.py
 
-# Run with specific data file
+# 4. Run with specific data file
 python main.py --data data/historical_prices.csv
 
-# Run dashboard
+# 5. Run dashboard
 streamlit run dashboard/dashboard.py
 
-# Run all tests
+# 6. Run all tests
 pytest tests/ -v
 ```
