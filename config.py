@@ -1,10 +1,8 @@
 """
 config.py — Centralized configuration for the Balanced Hybrid AI Trading Agent.
 
-
-All tunable parameters for strategies, risk management, AI weighting,
-and portfolio settings live here. Import this module wherever you need
-configuration values.
+All tunable parameters for strategies, risk management, regime detection,
+and portfolio settings live here.
 """
 
 from __future__ import annotations
@@ -26,34 +24,29 @@ class PortfolioConfig:
 @dataclass
 class RiskConfig:
     """Risk management thresholds."""
-    # Legacy fixed-percentage fields (kept for compatibility with tests / callers)
-    stop_loss_pct: float = 0.04           # 4% default stop-loss per trade
-    take_profit_pct: float = 0.06         # 6% default take-profit per trade
-
-    # ATR-based execution sizing / exits (spec F)
+    stop_loss_pct: float = 0.04
+    take_profit_pct: float = 0.06
     atr_sl_mult: float = 2.0
     atr_tp_mult: float = 3.0
-    risk_per_trade_pct: float = 0.02     # 2% risk per trade
-    max_capital_pct: float = 0.25        # 25% max capital allocation per trade
-    max_position_pct: float = 0.30       # 30% max of portfolio per position
-    daily_loss_cap_pct: float = 0.10     # 10% daily loss cap
-    max_drawdown_pct: float = 0.15       # 15% drawdown triggers defensive mode
-    defensive_size_mult: float = 0.25    # 75% reduction in defensive mode
-    atr_volatility_reduce_threshold: float = 2.0  # ATR_norm > this reduces size (not block)
-    consecutive_loss_pause: int = 3      # Pause after N consecutive stop-losses
-    min_confidence: float = 0.60         # Minimum combined confidence to trade
-    # Dynamic SL/TP (ATR-based)
-    use_dynamic_sl_tp: bool = True       # Enable ATR-based SL/TP
-    atr_sl_multiplier: float = 2.0       # SL = ATR * this
-    atr_tp_multiplier: float = 3.0       # TP = ATR * this
-    min_sl_pct: float = 0.02            # Floor: 2% minimum SL
-    max_sl_pct: float = 0.08            # Ceiling: 8% maximum SL
-    min_tp_pct: float = 0.03            # Floor: 3% minimum TP
-    max_tp_pct: float = 0.12            # Ceiling: 12% maximum TP
-    # Trailing stop
+    risk_per_trade_pct: float = 0.02
+    max_capital_pct: float = 0.25
+    max_position_pct: float = 0.30
+    daily_loss_cap_pct: float = 0.10
+    max_drawdown_pct: float = 0.15
+    defensive_size_mult: float = 0.25
+    atr_volatility_reduce_threshold: float = 2.0
+    consecutive_loss_pause: int = 3
+    min_confidence: float = 0.60
+    use_dynamic_sl_tp: bool = True
+    atr_sl_multiplier: float = 2.0
+    atr_tp_multiplier: float = 3.0
+    min_sl_pct: float = 0.02
+    max_sl_pct: float = 0.08
+    min_tp_pct: float = 0.03
+    max_tp_pct: float = 0.12
     use_trailing_stop: bool = True
-    trailing_breakeven_pct: float = 0.50  # At 50% of TP, tighten SL to breakeven
-    trailing_lock_pct: float = 0.75       # At 75% of TP, lock 50% of gains
+    trailing_breakeven_pct: float = 0.50
+    trailing_lock_pct: float = 0.75
 
 
 @dataclass
@@ -62,90 +55,77 @@ class MomentumConfig:
     ema_fast_period: int = 9
     ema_slow_period: int = 21
     volume_ma_period: int = 20
-    signal_threshold: float = 0.01       # Min crossover spread to trigger signal
-    # MACD confirmation
+    signal_threshold: float = 0.01
     macd_fast: int = 12
     macd_slow: int = 26
     macd_signal: int = 9
-    # ADX trend strength filter
     adx_period: int = 14
-    adx_threshold: float = 25.0          # Strong trend threshold
-    adx_weak_threshold: float = 20.0     # Below this = no trend → HOLD
+    adx_threshold: float = 25.0
+    adx_weak_threshold: float = 20.0
 
 
 @dataclass
 class MeanReversionConfig:
     """Mean-reversion strategy parameters."""
     lookback_period: int = 20
-    bb_std_dev: float = 2.0              # Bollinger Band standard deviations
-    zscore_entry: float = -2.0           # Z-score threshold to enter (buy)
-    zscore_exit: float = 0.0             # Z-score threshold to exit
+    bb_std_dev: float = 2.0
+    zscore_entry: float = -2.0
+    zscore_exit: float = 0.0
     rsi_period: int = 14
-    rsi_oversold: float = 35.0           # Widened from 30
-    rsi_overbought: float = 65.0         # Widened from 70
-    ema_spread_ranging_threshold: float = 0.0  # if 0, derived as 0.2% of ema_slow
-    # 2-of-N condition logic
-    min_conditions: int = 2              # Min conditions to trigger (out of 4)
-    # Stochastic confirmer
+    rsi_oversold: float = 35.0
+    rsi_overbought: float = 65.0
+    ema_spread_ranging_threshold: float = 0.0
+    min_conditions: int = 2
     stoch_k_period: int = 14
     stoch_d_period: int = 3
     stoch_oversold: float = 20.0
     stoch_overbought: float = 80.0
-    # ADX guard: suppress mean reversion in strong trends
-    adx_max_threshold: float = 30.0      # Suppress when ADX > this
+    adx_max_threshold: float = 30.0
     adx_period: int = 14
 
 
 @dataclass
-class YieldConfig:
-    """Yield optimizer parameters."""
-    min_apy: float = 0.05               # 5% minimum APY to consider
-    max_pool_allocation_pct: float = 0.20  # 20% max per pool
-    rebalance_threshold: float = 0.02    # 2% drift triggers rebalance
-
-
-@dataclass
-class AIConfig:
-    """AI predictor configuration."""
-    model_type: str = "lightweight"      # "lightweight" (sklearn) or "llm" (GPT4All)
-    llm_model_name: str = "orca-mini-3b-gguf2-q4_0.gguf"
-    confidence_weight: float = 0.35      # AI weight in combined decision
-    use_llm: bool = False                # Set True to use GPT4All (requires download)
-
-
-@dataclass
 class WeightConfig:
-    """Signal combination weights (must sum to 1.0)."""
-    momentum: float = 0.30
+    """Signal combination weights."""
+    momentum: float = 0.45
     mean_reversion: float = 0.30
-    yield_optimizer: float = 0.0
-    ai_predictor: float = 0.40
+    indicator_agreement: float = 0.25
 
 
 @dataclass
-class RegimeWeights:
-    """Regime-adaptive signal weights."""
-    # Trending market: favor momentum + AI
-    trending_momentum: float = 0.45
-    trending_mean_reversion: float = 0.10
-    trending_ai: float = 0.45
-    # Ranging market: favor mean reversion + AI
-    ranging_momentum: float = 0.10
-    ranging_mean_reversion: float = 0.45
-    ranging_ai: float = 0.45
-    # Volatile market: reduce all, lean on AI
-    volatile_momentum: float = 0.20
-    volatile_mean_reversion: float = 0.20
-    volatile_ai: float = 0.60
+class RegimeParams:
+    """Parameters for a single market regime."""
+    conf_threshold: float = 0.45
+    position_mult: float = 1.0
+    sl_atr_mult: float = 2.0
+    tp_atr_mult: float = 3.0
+
+
+@dataclass
+class RegimeConfig:
+    """Regime-specific trading parameters."""
+    trending_up: RegimeParams = field(default_factory=lambda: RegimeParams(
+        conf_threshold=0.28, position_mult=1.3, sl_atr_mult=1.5, tp_atr_mult=3.5,
+    ))
+    trending_down: RegimeParams = field(default_factory=lambda: RegimeParams(
+        conf_threshold=0.28, position_mult=1.3, sl_atr_mult=1.5, tp_atr_mult=3.5,
+    ))
+    choppy: RegimeParams = field(default_factory=lambda: RegimeParams(
+        conf_threshold=0.50, position_mult=0.4, sl_atr_mult=2.5, tp_atr_mult=2.0,
+    ))
+
+    def get(self, regime: str) -> RegimeParams:
+        """Get params for a regime name, defaulting to choppy."""
+        return getattr(self, regime, self.choppy)
 
 
 @dataclass
 class SignalConfig:
     """Signal combination parameters."""
-    signal_threshold: float = 0.20       # Min score to trigger BUY/SELL (raised from 0.12)
-    min_agreement: int = 2               # Min strategies agreeing on direction
+    signal_threshold: float = 0.20
+    min_agreement: int = 2
     use_regime_detection: bool = True
-    execute_confidence_threshold: float = 0.60  # Minimum combined confidence to execute
+    execute_confidence_threshold: float = 0.60
 
 
 @dataclass
@@ -155,10 +135,8 @@ class AppConfig:
     risk: RiskConfig = field(default_factory=RiskConfig)
     momentum: MomentumConfig = field(default_factory=MomentumConfig)
     mean_reversion: MeanReversionConfig = field(default_factory=MeanReversionConfig)
-    yield_opt: YieldConfig = field(default_factory=YieldConfig)
-    ai: AIConfig = field(default_factory=AIConfig)
     weights: WeightConfig = field(default_factory=WeightConfig)
-    regime_weights: RegimeWeights = field(default_factory=RegimeWeights)
+    regime: RegimeConfig = field(default_factory=RegimeConfig)
     signal: SignalConfig = field(default_factory=SignalConfig)
     log_level: str = "INFO"
     data_dir: str = "data"
