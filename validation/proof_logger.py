@@ -13,7 +13,6 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import Any
 
 from config import CONFIG
 from utils.helpers import utc_now_iso
