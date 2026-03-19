@@ -20,6 +20,7 @@ description: Audits indicators, removes contradictions, and simplifies signals t
    - Momentum: MACD histogram
    - Mean reversion: Bollinger Bands + RSI (only when trend is weak)
    - Volatility: ATR (risk sizing / SL/TP)
+   - **Deep Learning**: GRU model in `prediction/predict.py` consumes raw OHLCV sequences
 3. Ensure indicators are computed consistently using shared utilities:
    - `utils/indicators.py`
 4. Preserve module output contract:
