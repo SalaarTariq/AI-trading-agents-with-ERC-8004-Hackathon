@@ -44,9 +44,9 @@ class RiskConfig:
     max_sl_pct: float = 0.08
     min_tp_pct: float = 0.03
     max_tp_pct: float = 0.12
-    use_trailing_stop: bool = True
-    trailing_breakeven_pct: float = 0.50
-    trailing_lock_pct: float = 0.75
+    use_trailing_stop: bool = False
+    trailing_breakeven_pct: float = 0.65
+    trailing_lock_pct: float = 0.85
 
 
 @dataclass
@@ -99,19 +99,32 @@ class RegimeParams:
     position_mult: float = 1.0
     sl_atr_mult: float = 2.0
     tp_atr_mult: float = 3.0
+    w_mom: float = 0.45
+    w_mr: float = 0.30
+    w_ai: float = 0.25
 
 
 @dataclass
 class RegimeConfig:
-    """Regime-specific trading parameters."""
+    """Regime-specific trading parameters.
+
+    Tuned for real crypto data (live Binance 4h):
+        Regime         | Conf Thresh | Pos Mult | SL ATR | TP ATR | w_mom | w_mr
+        trending_up    | 0.40        | 1.0x     | 1.0    | 1.8    | 0.55  | 0.15
+        trending_down  | 0.25        | 1.0x     | 1.0    | 1.8    | 0.60  | 0.10
+        choppy         | 0.65        | 0.3x     | 1.2    | 1.5    | 0.20  | 0.50
+    """
     trending_up: RegimeParams = field(default_factory=lambda: RegimeParams(
-        conf_threshold=0.28, position_mult=1.3, sl_atr_mult=1.5, tp_atr_mult=3.5,
+        conf_threshold=0.40, position_mult=1.0, sl_atr_mult=1.0, tp_atr_mult=1.8,
+        w_mom=0.55, w_mr=0.15, w_ai=0.30,
     ))
     trending_down: RegimeParams = field(default_factory=lambda: RegimeParams(
-        conf_threshold=0.28, position_mult=1.3, sl_atr_mult=1.5, tp_atr_mult=3.5,
+        conf_threshold=0.25, position_mult=1.0, sl_atr_mult=1.0, tp_atr_mult=1.8,
+        w_mom=0.60, w_mr=0.10, w_ai=0.30,
     ))
     choppy: RegimeParams = field(default_factory=lambda: RegimeParams(
-        conf_threshold=0.50, position_mult=0.4, sl_atr_mult=2.5, tp_atr_mult=2.0,
+        conf_threshold=0.65, position_mult=0.3, sl_atr_mult=1.2, tp_atr_mult=1.5,
+        w_mom=0.20, w_mr=0.50, w_ai=0.30,
     ))
 
     def get(self, regime: str) -> RegimeParams:
