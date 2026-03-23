@@ -75,14 +75,24 @@ def generate_signal(
     ema_spread_pct = ema_spread / current_price
     macd_hist_pct = macd_hist / current_price
 
-    # Spec B: sensitive momentum signal via tanh
-    raw_val = float(np.tanh(ema_spread_pct / max(2 * atr_norm, 1e-8)) * (1 + macd_hist_pct / max(atr_norm, 1e-8)))
+    # Fast EMA crossover (5/13) for quicker trend detection
+    from utils.helpers import ema as ema_fn
+    close_s = df["close"]
+    ema5 = float(ema_fn(close_s, 5).iloc[-1])
+    ema13 = float(ema_fn(close_s, 13).iloc[-1])
+    fast_spread_pct = (ema5 - ema13) / current_price
 
-    rsi_ok = 25.0 <= rsi_now <= 75.0  # broadened for more trades
+    # Blend slow (9/21) and fast (5/13) EMA spreads for responsiveness
+    blended_spread = 0.6 * ema_spread_pct + 0.4 * fast_spread_pct
+
+    # Sensitive momentum signal via tanh
+    raw_val = float(np.tanh(blended_spread / max(1.5 * atr_norm, 1e-8)) * (1 + macd_hist_pct / max(atr_norm, 1e-8)))
+
+    rsi_ok = 25.0 <= rsi_now <= 75.0
     signal = 0
-    if raw_val > 0.1 and rsi_ok:
+    if raw_val > 0.05 and rsi_ok:
         signal = 1
-    elif raw_val < -0.1 and rsi_ok:
+    elif raw_val < -0.05 and rsi_ok:
         signal = -1
 
     raw_strength = float(np.clip(abs(raw_val), 0.0, 1.0)) if signal != 0 else 0.0
