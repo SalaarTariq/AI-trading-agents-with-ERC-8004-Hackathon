@@ -156,10 +156,15 @@ def check_risk(
             )
         adjusted_size = min(adjusted_size, portfolio.cash)
 
-    # --- 8. Regime-aware SL/TP via ATR multipliers ---
+    # --- 8. Regime-aware SL/TP via ATR multipliers, clamped to min/max pct ---
     if atr_val is not None and atr_val > 0:
         sl_dist = rp.sl_atr_mult * atr_val
         tp_dist = rp.tp_atr_mult * atr_val
+        # Clamp to min/max percentage of entry price
+        sl_dist = max(sl_dist, entry_price * cfg.min_sl_pct)
+        sl_dist = min(sl_dist, entry_price * cfg.max_sl_pct)
+        tp_dist = max(tp_dist, entry_price * cfg.min_tp_pct)
+        tp_dist = min(tp_dist, entry_price * cfg.max_tp_pct)
     else:
         sl_dist = entry_price * cfg.stop_loss_pct
         tp_dist = entry_price * cfg.take_profit_pct
