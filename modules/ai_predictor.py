@@ -60,12 +60,17 @@ def generate_signal_from_strategy_outputs(
         indicator_score += macd_contrib * 0.3
         ind_details["macd_hist_norm"] = round(macd_contrib, 4)
 
-        # RSI zone: <35 = bullish (+1), >65 = bearish (-1), else neutral
+        # RSI zone: use as mean-reversion hint only when EMA/MACD agree.
+        # If EMA and MACD are both negative (bearish), RSI oversold is NOT bullish.
         rsi_val = ind.rsi_14
+        ema_bearish = ema_contrib < -0.1
+        ema_bullish = ema_contrib > 0.1
         if rsi_val < 35:
-            rsi_contrib = (35 - rsi_val) / 35  # 0..1
+            # Oversold: bullish only if trend supports it
+            rsi_contrib = (35 - rsi_val) / 35 if not ema_bearish else 0.0
         elif rsi_val > 65:
-            rsi_contrib = -(rsi_val - 65) / 35  # -1..0
+            # Overbought: bearish only if trend supports it
+            rsi_contrib = -(rsi_val - 65) / 35 if not ema_bullish else 0.0
         else:
             rsi_contrib = 0.0
         indicator_score += rsi_contrib * 0.3
