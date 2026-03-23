@@ -24,6 +24,7 @@ import pandas as pd
 from config import CONFIG, AppConfig
 from utils.helpers import setup_logging, ema, atr
 from utils.data_loader import load_or_generate
+from utils.regime import detect_regime as _detect_regime, should_skip_trade, RegimeResult
 from modules.momentum import generate_signal as momentum_signal
 from modules.mean_reversion import generate_signal as mean_reversion_signal
 from modules.ai_predictor import generate_signal_from_strategy_outputs
@@ -39,37 +40,14 @@ logger = logging.getLogger(__name__)
 TRADE_LOG = Path("data/trade_history.jsonl")
 
 
-def detect_regime(df: pd.DataFrame) -> str:
+def detect_regime(df: pd.DataFrame) -> RegimeResult:
     """
-    Detect current market regime using EMA spread and ATR.
+    Detect current market regime (delegated to utils/regime.py).
 
     Returns:
-        One of "trending_up", "trending_down", "choppy".
+        RegimeResult with regime string, metrics, and filter flags.
     """
-    if len(df) < 30 or "close" not in df.columns:
-        return "choppy"
-
-    close = df["close"]
-    current_price = float(close.iloc[-1])
-    if current_price == 0:
-        return "choppy"
-
-    ema9 = ema(close, 9)
-    ema21 = ema(close, 21)
-    spread = float((ema9.iloc[-1] - ema21.iloc[-1]) / current_price)
-
-    atr_norm = 0.0
-    if {"high", "low"}.issubset(df.columns):
-        atr_series = atr(df["high"], df["low"], close, 14)
-        atr_val = float(atr_series.iloc[-1])
-        if not np.isnan(atr_val):
-            atr_norm = atr_val / current_price
-
-    if spread > 0.005 and atr_norm < 0.03:
-        return "trending_up"
-    if spread < -0.005 and atr_norm < 0.03:
-        return "trending_down"
-    return "choppy"
+    return _detect_regime(df)
 
 
 def combine_signals(
@@ -88,12 +66,14 @@ def combine_signals(
 
     rp = cfg.regime.get(regime)
 
+    # Regime-adaptive signal weights + counter-trend suppression
     conf, action = compute_confidence(
         mom, mr, ai, None,
         conf_threshold=rp.conf_threshold,
-        w_mom=cfg.weights.momentum,
-        w_mr=cfg.weights.mean_reversion,
-        w_ai=cfg.weights.indicator_agreement,
+        w_mom=rp.w_mom,
+        w_mr=rp.w_mr,
+        w_ai=rp.w_ai,
+        regime=regime,
     )
 
     details = {
@@ -155,11 +135,20 @@ def run_paper_trading(
     )
 
     open_position: dict | None = None
+    last_date: str = ""
 
     for i in range(warmup, total_bars):
         window = df.iloc[:i + 1]
         current_price = window["close"].iloc[-1]
         timestamp = str(window.index[-1])
+
+        # --- Daily PnL reset (detect new calendar day) ---
+        current_date = timestamp[:10]
+        if current_date != last_date:
+            if last_date:
+                logger.debug("Daily reset: PnL was $%.2f", portfolio.daily_pnl)
+            portfolio.daily_pnl = 0.0
+            last_date = current_date
 
         # --- Update trailing stop and check exit ---
         if open_position:
@@ -189,6 +178,9 @@ def run_paper_trading(
                     trade_record["exit_reason"],
                 )
                 open_position = None
+                # Post-loss cooldown: avoid re-entering immediately after SL
+                if hit_sl and portfolio.cooldown_bars < 5:
+                    portfolio.cooldown_bars = max(portfolio.cooldown_bars, 5)
 
         if open_position:
             continue
@@ -211,14 +203,26 @@ def run_paper_trading(
         ai_sig = generate_signal_from_strategy_outputs(strategy_signals, window)
         strategy_signals["ai_ensemble"] = ai_sig
 
-        # --- Detect regime ---
-        regime = detect_regime(window)
+        # --- Detect regime (strengthened: spread + ATR + volume + HTF) ---
+        regime_result = detect_regime(window)
+        regime = regime_result.regime
+
+        # --- Volume / HTF filters: skip trade if filters fail ---
+        skip_trade, skip_reason = should_skip_trade(regime_result)
 
         # --- Combine all signals ---
         combined = combine_signals(strategy_signals, cfg, regime=regime)
 
         # --- Risk check with regime ---
-        if combined["action"] in ("BUY", "SELL"):
+        if skip_trade:
+            risk_result = RiskResult(
+                approved=False,
+                reasons=[f"Regime filter: {skip_reason}"],
+                adjusted_size=0.0,
+                stop_loss_price=0.0,
+                take_profit_price=0.0,
+            )
+        elif combined["action"] in ("BUY", "SELL"):
             requested_size = portfolio.cash * 0.2
             risk_result = check_risk(
                 signal=combined["action"],
@@ -270,6 +274,15 @@ def run_paper_trading(
                 if ind is not None
                 else {}
             ),
+            "regime_detail": {
+                "regime": regime_result.regime,
+                "ema_spread_norm": regime_result.ema_spread_norm,
+                "atr_norm": regime_result.atr_norm,
+                "volume_ratio": regime_result.volume_ratio,
+                "htf_trend": regime_result.htf_trend,
+                "volume_ok": regime_result.volume_ok,
+                "htf_confirms": regime_result.htf_confirms,
+            },
             "risk_result": {
                 "approved": risk_result.approved,
                 "reasons": risk_result.reasons,
@@ -313,9 +326,10 @@ def run_paper_trading(
             }
 
             logger.info(
-                "Opened %s %s @ %g size=$%.0f (SL=%g TP=%g) regime=%s",
+                "Opened %s %s @ %g size=$%.0f (SL=%g TP=%g) regime=%s vol_ratio=%.2f htf=%s",
                 combined["action"], pair, current_price, size,
                 risk_result.stop_loss_price, risk_result.take_profit_price, regime,
+                regime_result.volume_ratio, regime_result.htf_trend,
             )
 
     # --- Close any remaining position at last price ---
