@@ -21,6 +21,7 @@ def compute_confidence(
     w_mom: float = 0.45,
     w_mr: float = 0.30,
     w_ai: float = 0.25,
+    regime: str = "choppy",
 ) -> tuple[float, str]:
     """
     Compute combined confidence and action.
@@ -34,6 +35,7 @@ def compute_confidence(
         w_mom: Weight for momentum signal.
         w_mr: Weight for mean-reversion signal.
         w_ai: Weight for AI/indicator agreement signal.
+        regime: Current market regime for counter-trend suppression.
 
     Returns:
         (confidence, action) where confidence is in [0, 1].
@@ -49,6 +51,14 @@ def compute_confidence(
     m_val = m_sig * m_str
     r_val = r_sig * r_str
     ai_val = (prob_up - 0.5) * 2.0  # map [0,1] → [-1,1]
+
+    # Suppress counter-trend mean-reversion signals:
+    # In trending_down, MR BUY signals (buying dips) are dangerous
+    # In trending_up, MR SELL signals (selling rips) fight the trend
+    if regime == "trending_down" and r_val > 0:
+        r_val *= 0.2  # heavily dampen counter-trend MR
+    elif regime == "trending_up" and r_val < 0:
+        r_val *= 0.2
 
     # Weighted sum: [-1, 1]
     raw_score = w_mom * m_val + w_mr * r_val + w_ai * ai_val
