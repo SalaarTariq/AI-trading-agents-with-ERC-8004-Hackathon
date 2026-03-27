@@ -47,13 +47,13 @@ class TestConfidenceThreshold:
         assert any("Confidence" in r for r in result.reasons)
 
     def test_exact_threshold_approved(self, default_portfolio):
-        # Trending regime has threshold 0.35, so 0.35 passes
+        # Trending regime has threshold 0.60, so 0.60 passes
         regime_cfg = RegimeConfig(
-            trending_up=RegimeParams(conf_threshold=0.35, position_mult=1.0,
+            trending_up=RegimeParams(conf_threshold=0.60, position_mult=1.0,
                                      sl_atr_mult=2.0, tp_atr_mult=3.0),
         )
         result = check_risk(
-            signal="BUY", confidence=0.35, entry_price=3000.0,
+            signal="BUY", confidence=0.60, entry_price=3000.0,
             requested_size=10_000, portfolio=default_portfolio,
             regime="trending_up", regime_cfg=regime_cfg,
         )
@@ -136,7 +136,7 @@ class TestConsecutiveLossPause:
         assert result.approved is False
         assert any("cooldown" in r.lower() for r in result.reasons)
         # Should have set cooldown and reset consecutive_losses
-        assert portfolio.cooldown_bars == 10
+        assert portfolio.cooldown_bars == 8  # v3: reduced from 10 to 8
         assert portfolio.consecutive_losses == 0
 
     def test_cooldown_blocks_trades(self):

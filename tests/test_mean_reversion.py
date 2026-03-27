@@ -16,8 +16,8 @@ class TestMeanReversionSignalFormat:
     def test_returns_required_keys(self, sample_ohlcv):
         result = generate_signal(sample_ohlcv)
         assert "signal" in result
-        assert "raw_strength" in result
-        assert "confidence" in result  # compatibility
+        assert "confidence" in result  # New API (was raw_strength)
+        assert "signal_str" in result
         assert "metadata" in result
 
     def test_signal_is_valid(self, sample_ohlcv):

@@ -1,10 +1,15 @@
 """
 validation/proof_logger.py — SHA256 proof logging for ERC-8004 validation.
 
-
 Every trade decision (executed or rejected) produces a deterministic
 hash of its full record. Hashes are appended to a JSONL file for
 auditability and future on-chain submission.
+
+ERC-8004 Registry Mapping:
+    Identity Registry  — Agent identity, strategy version, pair (who made the decision)
+    Reputation Registry — Portfolio snapshot, rolling metrics (track record over time)
+    Validation Registry — SHA256 proof hash of the full decision record (tamper-proof artifact)
+    TradeIntent (EIP-712) — Structured intent: pair, action, price, size, SL/TP, confidence
 """
 
 from __future__ import annotations
@@ -193,7 +198,9 @@ def _build_full_record(decision_record: dict) -> dict:
     pair = decision_record.get("pair") or decision_record.get("final_decision", {}).get("pair") or "?"
     dataset = decision_record.get("dataset", "")
 
-    # Identity registry (deterministic)
+    # ── ERC-8004: Identity Registry ──────────────────────────────────
+    # Maps to on-chain Identity Registry — uniquely identifies the agent,
+    # its strategy version, and the market it operates on.
     identity = {
         "agent_id": "balanced_hybrid_ai_trading_agent",
         "strategy_version": "v2_confidence_weighted",
@@ -201,7 +208,9 @@ def _build_full_record(decision_record: dict) -> dict:
         "dataset": dataset,
     }
 
-    # Reputation snapshot (best-effort; still deterministic)
+    # ── ERC-8004: Reputation Registry ────────────────────────────────
+    # Snapshot of agent performance at decision time.  On-chain, this
+    # feeds the Reputation Score that other agents / protocols query.
     ps = decision_record.get("portfolio_state", {}) if isinstance(decision_record.get("portfolio_state"), dict) else {}
     reputation = {
         "portfolio_value": ps.get("total_value", None),
@@ -212,6 +221,9 @@ def _build_full_record(decision_record: dict) -> dict:
         "max_drawdown": None,
     }
 
+    # ── ERC-8004: TradeIntent (EIP-712 structured data) ──────────────
+    # This is the EIP-712 typed-data intent that will be signed and
+    # submitted to the Risk Router / Aerodrome DEX on Base.
     rr = decision_record.get("risk_result", {}) if isinstance(decision_record.get("risk_result"), dict) else {}
     fd = decision_record.get("final_decision", {}) if isinstance(decision_record.get("final_decision"), dict) else {}
     intent = {
@@ -231,6 +243,9 @@ def _build_full_record(decision_record: dict) -> dict:
         "risk_pass_fail": rr.get("approved", False),
     }
 
+    # ── ERC-8004: Validation Registry ────────────────────────────────
+    # SHA256 hash of the raw decision inputs.  On-chain, this artifact
+    # is stored in the Validation Registry for tamper-proof auditability.
     inputs_digest = generate_proof_hash(decision_record)
     validation = {
         "hash_algo": "sha256",
