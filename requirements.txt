@@ -1,20 +1,10 @@
-# Core dependencies
+# Core
 pandas>=2.0.0
 numpy>=1.24.0
-
-# Technical indicators
-ta>=0.11.0
 
 # Dashboard
 streamlit>=1.28.0
 
-# ML / AI
-scikit-learn>=1.3.0
-# gpt4all>=2.0.0  # Uncomment to use local LLM (requires model download)
-
 # Testing
 pytest>=7.4.0
 pytest-cov>=4.1.0
-
-# Utilities
-pyyaml>=6.0
