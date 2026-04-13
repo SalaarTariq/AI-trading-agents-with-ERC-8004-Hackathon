@@ -1,13 +1,7 @@
-"""
-utils/indicators.py — Centralized indicator computation.
+"""Shared indicator calculations for the cleaned trading pipeline.
 
-Per your spec, this module exposes ONE shared function that computes:
-- EMA_fast (default 9)
-- EMA_slow (default 21)
-- EMA_spread = EMA_fast - EMA_slow
-- RSI(14)
-- MACD(12,26,9): line, signal, histogram
-- ATR(14)
+All indicators are computed once per dataset in `precompute_all_indicators`,
+which avoids repeated per-bar recomputation and keeps strategy logic fast.
 """
 
 from __future__ import annotations
@@ -17,197 +11,106 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from utils.helpers import adx, atr, ema, macd, rsi, bollinger_bands
+from config import StrategyConfig, CONFIG
+from utils.helpers import adx, atr, bollinger_bands, ema, macd, rsi
 
 
 @dataclass(frozen=True)
 class Indicators:
+    """Latest-bar indicator bundle consumed by strategy and risk modules."""
+
     ema_fast: float
     ema_slow: float
     ema_spread: float
-    ema_spread_norm: float
+    ema_spread_pct: float
     rsi_14: float
-    macd_line: float
-    macd_signal: float
     macd_hist: float
-    macd_hist_norm: float
     atr_14: float | None
     atr_norm_14: float | None
-    bb_width: float | None
-
-
-def compute_indicators(
-    df: pd.DataFrame,
-    *,
-    ema_fast_period: int = 9,
-    ema_slow_period: int = 21,
-    rsi_period: int = 14,
-    macd_fast: int = 12,
-    macd_slow: int = 26,
-    macd_signal: int = 9,
-    atr_period: int = 14,
-) -> Indicators | None:
-    """
-    Compute a single, shared indicator bundle for the latest bar.
-
-    Returns None when inputs are insufficient or values are not computable.
-    """
-    if df is None or len(df) < max(ema_slow_period, rsi_period, macd_slow, atr_period) + 2:
-        return None
-    close_s = df["close"]
-    close = float(close_s.iloc[-1])
-    if close == 0:
-        return None
-
-    ema_fast_s = ema(close_s, ema_fast_period)
-    ema_slow_s = ema(close_s, ema_slow_period)
-    ema_fast_v = float(ema_fast_s.iloc[-1])
-    ema_slow_v = float(ema_slow_s.iloc[-1])
-    if np.isnan(ema_fast_v) or np.isnan(ema_slow_v):
-        return None
-
-    rsi_s = rsi(close_s, rsi_period)
-    rsi_v = float(rsi_s.iloc[-1])
-    if np.isnan(rsi_v):
-        return None
-
-    macd_line_s, macd_signal_s, macd_hist_s = macd(close_s, macd_fast, macd_slow, macd_signal)
-    macd_line_v = float(macd_line_s.iloc[-1])
-    macd_signal_v = float(macd_signal_s.iloc[-1])
-    macd_hist_v = float(macd_hist_s.iloc[-1])
-    if np.isnan(macd_line_v) or np.isnan(macd_signal_v) or np.isnan(macd_hist_v):
-        return None
-
-    atr_v = None
-    atr_norm_v = None
-    if {"high", "low"}.issubset(df.columns):
-        atr_s = atr(df["high"], df["low"], close_s, atr_period)
-        atr_val = float(atr_s.iloc[-1])
-        if not np.isnan(atr_val):
-            atr_v = atr_val
-            atr_norm_v = atr_val / close if close != 0 else None
-
-    ema_spread_norm = float(np.tanh(float(ema_fast_v - ema_slow_v) / max(close * 0.01, 1e-12)))
-    macd_hist_norm = float(np.tanh(macd_hist_v / max(close * 0.005, 1e-12)))
-
-    mid, upper, lower = bollinger_bands(close_s, 20, 2.0)
-    mid_v = float(mid.iloc[-1])
-    upp_v = float(upper.iloc[-1])
-    low_v = float(lower.iloc[-1])
-    bb_width_v = float((upp_v - low_v) / mid_v) if mid_v > 0 and not np.isnan(mid_v) else 0.0
-
-    return Indicators(
-        ema_fast=ema_fast_v,
-        ema_slow=ema_slow_v,
-        ema_spread=float(ema_fast_v - ema_slow_v),
-        ema_spread_norm=ema_spread_norm,
-        rsi_14=float(rsi_v),
-        macd_line=float(macd_line_v),
-        macd_signal=float(macd_signal_v),
-        macd_hist=float(macd_hist_v),
-        macd_hist_norm=macd_hist_norm,
-        atr_14=atr_v,
-        atr_norm_14=atr_norm_v,
-        bb_width=bb_width_v,
-    )
+    bb_mid: float
+    bb_upper: float
+    bb_lower: float
+    bb_zscore: float
+    adx_14: float
 
 
 def precompute_all_indicators(
     df: pd.DataFrame,
-    *,
-    ema_fast_period: int = 9,
-    ema_slow_period: int = 21,
-    rsi_period: int = 14,
-    macd_fast: int = 12,
-    macd_slow: int = 26,
-    macd_signal_period: int = 9,
-    atr_period: int = 14,
-    bb_period: int = 20,
-    bb_std: float = 2.0,
+    cfg: StrategyConfig | None = None,
 ) -> pd.DataFrame:
-    """
-    Pre-compute all indicator series on the full DataFrame at once.
+    """Precompute all indicators needed by the strategy in one pass."""
+    cfg = cfg or CONFIG.strategy
 
-    Returns a DataFrame with the same index as `df` plus indicator columns.
-    Values before the warm-up period will be NaN.
-    """
-    close_s = df["close"]
-
-    ema_fast_s = ema(close_s, ema_fast_period)
-    ema_slow_s = ema(close_s, ema_slow_period)
+    close = df["close"]
+    ema_fast_s = ema(close, cfg.ema_fast_period)
+    ema_slow_s = ema(close, cfg.ema_slow_period)
     ema_spread_s = ema_fast_s - ema_slow_s
-    rsi_s = rsi(close_s, rsi_period)
-    macd_line_s, macd_sig_s, macd_hist_s = macd(close_s, macd_fast, macd_slow, macd_signal_period)
-    mid_s, upper_s, lower_s = bollinger_bands(close_s, bb_period, bb_std)
 
-    # EMA5/EMA13 for momentum fast crossover
-    ema5_s = ema(close_s, 5)
-    ema13_s = ema(close_s, 13)
+    rsi_s = rsi(close, cfg.rsi_period)
+    _, _, macd_hist_s = macd(close, cfg.macd_fast, cfg.macd_slow, cfg.macd_signal)
 
-    # EMA50 for HTF trend
-    ema50_s = ema(close_s, 50)
+    bb_mid, bb_upper, bb_lower = bollinger_bands(close, cfg.bb_period, cfg.bb_std_dev)
 
-    result = pd.DataFrame({
-        "ema_fast": ema_fast_s,
-        "ema_slow": ema_slow_s,
-        "ema_spread": ema_spread_s,
-        "rsi_14": rsi_s,
-        "macd_line": macd_line_s,
-        "macd_signal": macd_sig_s,
-        "macd_hist": macd_hist_s,
-        "bb_mid": mid_s,
-        "bb_upper": upper_s,
-        "bb_lower": lower_s,
-        "ema5": ema5_s,
-        "ema13": ema13_s,
-        "ema50": ema50_s,
-    }, index=df.index)
+    out = pd.DataFrame(index=df.index)
+    out["ema_fast"] = ema_fast_s
+    out["ema_slow"] = ema_slow_s
+    out["ema_spread"] = ema_spread_s
+    out["ema_spread_pct"] = ema_spread_s / close.replace(0, np.nan)
+    out["rsi_14"] = rsi_s
+    out["macd_hist"] = macd_hist_s
 
-    # ATR + ADX
     if {"high", "low"}.issubset(df.columns):
-        atr_s = atr(df["high"], df["low"], close_s, atr_period)
-        result["atr_14"] = atr_s
-        result["atr_norm_14"] = atr_s / close_s
-        result["adx_14"] = adx(df["high"], df["low"], close_s, 14)
+        atr_s = atr(df["high"], df["low"], close, cfg.atr_period)
+        adx_s = adx(df["high"], df["low"], close, cfg.adx_period)
+        out["atr_14"] = atr_s
+        out["atr_norm_14"] = atr_s / close.replace(0, np.nan)
+        out["adx_14"] = adx_s
     else:
-        result["atr_14"] = np.nan
-        result["atr_norm_14"] = np.nan
-        result["adx_14"] = np.nan
+        out["atr_14"] = np.nan
+        out["atr_norm_14"] = np.nan
+        out["adx_14"] = np.nan
 
-    # RSI rolling lookbacks for pullback detection
-    result["rsi_14_high_5"] = result["rsi_14"].rolling(5, min_periods=1).max()
-    result["rsi_14_low_5"] = result["rsi_14"].rolling(5, min_periods=1).min()
+    out["bb_mid"] = bb_mid
+    out["bb_upper"] = bb_upper
+    out["bb_lower"] = bb_lower
 
-    # Close vs EMA9 distance (proximity-based entries)
-    result["close_vs_ema9"] = (close_s - ema_fast_s) / close_s.clip(lower=1e-12)
+    # Convert BB channel to z-score proxy using std implied by BB width.
+    bb_std = (bb_upper - bb_lower) / (2.0 * cfg.bb_std_dev)
+    out["bb_zscore"] = (close - bb_mid) / bb_std.replace(0, np.nan)
 
-    # MACD crossover detection: 1 = bullish cross, -1 = bearish, 0 = none
-    macd_sign = np.sign(macd_hist_s)
-    macd_sign_prev = macd_sign.shift(1)
-    result["macd_cross"] = 0
-    result.loc[(macd_sign > 0) & (macd_sign_prev <= 0), "macd_cross"] = 1
-    result.loc[(macd_sign < 0) & (macd_sign_prev >= 0), "macd_cross"] = -1
+    # Used by confidence scoring for top-20% volatility penalties.
+    out["atr_norm_q80_120"] = out["atr_norm_14"].rolling(120, min_periods=30).quantile(0.8)
 
-    # ADX slope: 3-bar change in ADX (rising = strengthening trend)
-    if "adx_14" in result.columns:
-        result["adx_slope"] = result["adx_14"] - result["adx_14"].shift(3)
-    else:
-        result["adx_slope"] = 0.0
+    # Reversal velocity input for mean-reversion confidence boost.
+    out["rsi_delta_3"] = out["rsi_14"] - out["rsi_14"].shift(3)
 
-    # RSI 3-bar change (reversion velocity for MR)
-    result["rsi_delta_3"] = result["rsi_14"] - result["rsi_14"].shift(3)
+    return out
 
-    # Volume SMA for regime detection
-    if "volume" in df.columns:
-        from utils.helpers import sma as _sma
-        result["vol_sma20"] = _sma(df["volume"], 20)
 
-    # Normalized indicators
-    result["ema_spread_norm"] = np.tanh(ema_spread_s / (close_s * 0.01).clip(lower=1e-12))
-    result["macd_hist_norm"] = np.tanh(macd_hist_s / (close_s * 0.005).clip(lower=1e-12))
+def indicators_at(pre: pd.DataFrame, idx: int) -> Indicators | None:
+    """Build an Indicators object from precomputed rows at index `idx`."""
+    row = pre.iloc[idx]
 
-    # BB width
-    result["bb_width"] = (upper_s - lower_s) / mid_s.replace(0, np.nan)
+    required = ["ema_fast", "ema_slow", "ema_spread", "ema_spread_pct", "rsi_14", "macd_hist", "bb_mid", "bb_upper", "bb_lower", "bb_zscore"]
+    if any(np.isnan(row.get(col, np.nan)) for col in required):
+        return None
 
-    return result
+    atr_val = None if np.isnan(row.get("atr_14", np.nan)) else float(row["atr_14"])
+    atr_norm = None if np.isnan(row.get("atr_norm_14", np.nan)) else float(row["atr_norm_14"])
+    adx_val = 0.0 if np.isnan(row.get("adx_14", np.nan)) else float(row["adx_14"])
 
+    return Indicators(
+        ema_fast=float(row["ema_fast"]),
+        ema_slow=float(row["ema_slow"]),
+        ema_spread=float(row["ema_spread"]),
+        ema_spread_pct=float(row["ema_spread_pct"]),
+        rsi_14=float(row["rsi_14"]),
+        macd_hist=float(row["macd_hist"]),
+        atr_14=atr_val,
+        atr_norm_14=atr_norm,
+        bb_mid=float(row["bb_mid"]),
+        bb_upper=float(row["bb_upper"]),
+        bb_lower=float(row["bb_lower"]),
+        bb_zscore=float(row["bb_zscore"]),
+        adx_14=adx_val,
+    )
