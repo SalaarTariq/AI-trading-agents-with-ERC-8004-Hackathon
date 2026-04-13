@@ -1,15 +1,7 @@
-"""
-validation/proof_logger.py — SHA256 proof logging for ERC-8004 validation.
+"""Deterministic ERC-8004 proof logging.
 
-Every trade decision (executed or rejected) produces a deterministic
-hash of its full record. Hashes are appended to a JSONL file for
-auditability and future on-chain submission.
-
-ERC-8004 Registry Mapping:
-    Identity Registry  — Agent identity, strategy version, pair (who made the decision)
-    Reputation Registry — Portfolio snapshot, rolling metrics (track record over time)
-    Validation Registry — SHA256 proof hash of the full decision record (tamper-proof artifact)
-    TradeIntent (EIP-712) — Structured intent: pair, action, price, size, SL/TP, confidence
+This module is intentionally kept stable during cleanup because validation
+integrity is critical for hackathon auditability.
 """
 
 from __future__ import annotations
