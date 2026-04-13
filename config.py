@@ -1,15 +1,7 @@
-"""
-config.py — Centralized configuration for the Balanced Hybrid AI Trading Agent.
+"""Centralized configuration for the cleaned ERC-8004 trading agent.
 
-All tunable parameters for strategies, risk management, regime detection,
-and portfolio settings live here.
-
-KEY CHANGES (v3 — profitability overhaul):
-- Asymmetric R:R: TP targets 2-3x SL distance for positive expectancy
-- Regime params tuned: trending regimes get lower thresholds, wider TPs
-- Trailing stop activates earlier to lock profits
-- Risk per trade slightly higher to let winners compound
-- Reduced cooldown severity to avoid missing recovery trades
+This file intentionally keeps all tunable settings in one place so strategy,
+risk, and execution behavior can be changed without touching business logic.
 """
 
 from __future__ import annotations
@@ -19,159 +11,146 @@ from dataclasses import dataclass, field
 
 @dataclass
 class PortfolioConfig:
-    """Portfolio and account settings."""
+    """Portfolio/account-level settings."""
+
     initial_balance: float = 100_000.0
     base_currency: str = "USDC"
-    trading_pairs: list[str] = field(default_factory=lambda: [
-        "ETH/USDC", "BTC/USDC", "SOL/USDC"
-    ])
+    trading_pairs: list[str] = field(default_factory=lambda: ["ETH/USDC"])
     max_concurrent_positions: int = 5
 
 
 @dataclass
-class RiskConfig:
-    """Risk management thresholds.
+class StrategyConfig:
+    """Strategy and regime thresholds used by modules/strategy.py."""
 
-    KEY CHANGE: Asymmetric R:R — TP is 2-3x SL for positive expectancy.
-    Even with 45% win rate, 2:1 R:R is profitable.
-    """
-    stop_loss_pct: float = 0.04          # Default SL: 4%
-    take_profit_pct: float = 0.07        # Default TP: 7% (1.75:1 R:R)
-    atr_sl_mult: float = 1.8             # SL: 1.8x ATR (balanced whipsaw avoidance)
-    atr_tp_mult: float = 3.2             # TP: 3.2x ATR (~1.8:1 R:R)
-    risk_per_trade_pct: float = 0.015    # 1.5% risk per trade
-    max_capital_pct: float = 0.20
-    max_position_pct: float = 0.25
-    daily_loss_cap_pct: float = 0.08     # Tighter daily cap
-    max_drawdown_pct: float = 0.15
-    defensive_size_mult: float = 0.25
-    atr_volatility_reduce_threshold: float = 0.03  # Normalized ATR threshold
-    consecutive_loss_pause: int = 3
-    min_confidence: float = 0.55
-    use_dynamic_sl_tp: bool = True
-    atr_sl_multiplier: float = 2.0       # SL wide enough to avoid noise
-    atr_tp_multiplier: float = 3.0       # TP reachable but still > SL
-    min_sl_pct: float = 0.025            # Min SL: 2.5%
-    max_sl_pct: float = 0.06             # Max SL: 6%
-    min_tp_pct: float = 0.035            # Min TP: 3.5%
-    max_tp_pct: float = 0.12             # Max TP: 12%
-    use_trailing_stop: bool = True
-    trailing_breakeven_pct: float = 0.60  # Move to breakeven at 60% of TP
-    trailing_lock_pct: float = 0.80       # Lock 60% profit at 80% of TP
-
-
-@dataclass
-class MomentumConfig:
-    """Momentum strategy parameters."""
+    # Indicator periods
     ema_fast_period: int = 9
     ema_slow_period: int = 21
-    volume_ma_period: int = 20
-    signal_threshold: float = 0.01
+    rsi_period: int = 14
     macd_fast: int = 12
     macd_slow: int = 26
     macd_signal: int = 9
-    adx_period: int = 14
-    adx_threshold: float = 20.0         # Lowered from 25 — capture more trends
-    adx_weak_threshold: float = 15.0    # Lowered from 20
-
-
-@dataclass
-class MeanReversionConfig:
-    """Mean-reversion strategy parameters."""
-    lookback_period: int = 20
+    atr_period: int = 14
+    bb_period: int = 20
     bb_std_dev: float = 2.0
-    zscore_entry: float = -2.0
-    zscore_exit: float = 0.0
-    rsi_period: int = 14
-    rsi_oversold: float = 35.0
-    rsi_overbought: float = 65.0
-    ema_spread_ranging_threshold: float = 0.0
-    min_conditions: int = 2
-    stoch_k_period: int = 14
-    stoch_d_period: int = 3
-    stoch_oversold: float = 20.0
-    stoch_overbought: float = 80.0
-    adx_max_threshold: float = 25.0     # ADX < 25 = ranging market
     adx_period: int = 14
 
+    # Regime detection thresholds
+    regime_trend_up_spread_pct: float = 0.0025
+    regime_trend_down_spread_pct: float = -0.0025
+    regime_ranging_abs_spread_pct: float = 0.0015
+    regime_trend_adx_min: float = 25.0
+    regime_ranging_adx_max: float = 20.0
 
-@dataclass
-class WeightConfig:
-    """Signal combination weights."""
-    momentum: float = 0.45
-    mean_reversion: float = 0.30
-    indicator_agreement: float = 0.25
+    # Momentum entry thresholds (used in trending regimes)
+    momentum_spread_pct_min: float = 0.0025
+    momentum_macd_hist_abs_min: float = 0.03
+    momentum_rsi_min: float = 45.0
+    momentum_rsi_max: float = 55.0
 
-
-@dataclass
-class RegimeParams:
-    """Parameters for a single market regime."""
-    conf_threshold: float = 0.45
-    position_mult: float = 1.0
-    sl_atr_mult: float = 1.5
-    tp_atr_mult: float = 3.5
-    w_mom: float = 0.45
-    w_mr: float = 0.30
-    w_ai: float = 0.25
-
-
-@dataclass
-class RegimeConfig:
-    """Regime-specific trading parameters.
-
-    v3 tuning — R:R calibrated for 4h crypto candles:
-        Regime         | Conf Thresh | Pos Mult | SL ATR | TP ATR | w_mom | w_mr
-        trending_up    | 0.55        | 1.0x     | 1.8    | 3.0    | 0.90  | 0.10
-        trending_down  | 0.55        | 0.8x     | 1.8    | 3.0    | 0.90  | 0.10
-        ranging        | 0.58        | 0.6x     | 1.5    | 2.2    | 0.10  | 0.90
-        choppy         | 0.65        | 0.3x     | 2.0    | 2.8    | 0.45  | 0.55
-    """
-    trending_up: RegimeParams = field(default_factory=lambda: RegimeParams(
-        conf_threshold=0.55, position_mult=1.0, sl_atr_mult=1.8, tp_atr_mult=3.6,
-        w_mom=0.90, w_mr=0.10, w_ai=0.0,
-    ))
-    trending_down: RegimeParams = field(default_factory=lambda: RegimeParams(
-        conf_threshold=0.55, position_mult=0.8, sl_atr_mult=1.8, tp_atr_mult=3.6,
-        w_mom=0.90, w_mr=0.10, w_ai=0.0,
-    ))
-    ranging: RegimeParams = field(default_factory=lambda: RegimeParams(
-        conf_threshold=0.58, position_mult=0.6, sl_atr_mult=1.5, tp_atr_mult=2.8,
-        w_mom=0.10, w_mr=0.90, w_ai=0.0,
-    ))
-    choppy: RegimeParams = field(default_factory=lambda: RegimeParams(
-        conf_threshold=0.65, position_mult=0.3, sl_atr_mult=1.8, tp_atr_mult=3.0,
-        w_mom=0.45, w_mr=0.55, w_ai=0.0,
-    ))
-
-    def get(self, regime: str) -> RegimeParams:
-        """Get params for a regime name, defaulting to choppy."""
-        return getattr(self, regime, self.choppy)
+    # Mean-reversion entry thresholds (used in ranging regime)
+    meanrev_zscore_entry: float = 1.8
+    meanrev_rsi_buy_max: float = 35.0
+    meanrev_rsi_sell_min: float = 65.0
+    meanrev_velocity_bonus_trigger: float = 5.0
 
 
 @dataclass
 class SignalConfig:
-    """Signal combination parameters."""
-    signal_threshold: float = 0.20
-    min_agreement: int = 2
-    use_regime_detection: bool = True
-    execute_confidence_threshold: float = 0.60
+    """Confidence-combining and execution gate settings."""
+
+    execute_confidence_threshold: float = 0.67
+    strong_support_min_strength: float = 0.55
+
+    # Regime-aware blending between momentum and mean-reversion strengths.
+    trend_momentum_weight: float = 0.85
+    trend_meanrev_weight: float = 0.15
+    range_momentum_weight: float = 0.15
+    range_meanrev_weight: float = 0.85
+    choppy_momentum_weight: float = 0.55
+    choppy_meanrev_weight: float = 0.45
+
+    agreement_bonus: float = 0.15
+    regime_quality_bonus: float = 0.10
+    high_volatility_penalty: float = 0.20
+
+
+@dataclass
+class RegimeParams:
+    """Risk execution multipliers per regime."""
+
+    conf_threshold: float = 0.67
+    position_mult: float = 1.0
+    sl_atr_mult: float = 2.2
+    tp_atr_mult: float = 3.8
+
+
+@dataclass
+class RegimeConfig:
+    """Risk defaults for each regime."""
+
+    trending_up: RegimeParams = field(
+        default_factory=lambda: RegimeParams(conf_threshold=0.67, position_mult=1.00)
+    )
+    trending_down: RegimeParams = field(
+        default_factory=lambda: RegimeParams(conf_threshold=0.67, position_mult=0.60)
+    )
+    ranging: RegimeParams = field(
+        default_factory=lambda: RegimeParams(conf_threshold=0.67, position_mult=0.80)
+    )
+    choppy: RegimeParams = field(
+        default_factory=lambda: RegimeParams(conf_threshold=0.70, position_mult=0.40)
+    )
+
+    def get(self, regime: str) -> RegimeParams:
+        return getattr(self, regime, self.choppy)
+
+
+@dataclass
+class RiskConfig:
+    """Risk-manager controls kept strict for capital protection."""
+
+    stop_loss_pct: float = 0.04
+    take_profit_pct: float = 0.06
+
+    min_confidence: float = 0.67
+    daily_loss_cap_pct: float = 0.08
+    max_drawdown_pct: float = 0.15
+
+    max_position_pct: float = 0.25
+    max_capital_pct: float = 0.20
+    risk_per_trade_pct: float = 0.015
+
+    atr_volatility_reduce_threshold: float = 0.03
+
+    use_dynamic_sl_tp: bool = True
+    atr_sl_multiplier: float = 2.2
+    atr_tp_multiplier: float = 3.8
+    min_sl_pct: float = 0.025
+    max_sl_pct: float = 0.06
+    min_tp_pct: float = 0.035
+    max_tp_pct: float = 0.12
+
+    use_trailing_stop: bool = True
+    trailing_breakeven_pct: float = 0.60
+    trailing_lock_pct: float = 0.70
+
+    consecutive_loss_pause: int = 3
 
 
 @dataclass
 class AppConfig:
-    """Top-level application config aggregating all sub-configs."""
+    """Top-level app config used by the main pipeline."""
+
     portfolio: PortfolioConfig = field(default_factory=PortfolioConfig)
-    risk: RiskConfig = field(default_factory=RiskConfig)
-    momentum: MomentumConfig = field(default_factory=MomentumConfig)
-    mean_reversion: MeanReversionConfig = field(default_factory=MeanReversionConfig)
-    weights: WeightConfig = field(default_factory=WeightConfig)
-    regime: RegimeConfig = field(default_factory=RegimeConfig)
+    strategy: StrategyConfig = field(default_factory=StrategyConfig)
     signal: SignalConfig = field(default_factory=SignalConfig)
+    risk: RiskConfig = field(default_factory=RiskConfig)
+    regime: RegimeConfig = field(default_factory=RegimeConfig)
+
     log_level: str = "INFO"
     data_dir: str = "data"
     proof_log_path: str = "validation/proof_log.jsonl"
-    dashboard_refresh_seconds: int = 60
 
 
-# Global default config instance
 CONFIG = AppConfig()
