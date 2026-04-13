@@ -1,170 +1,141 @@
+# PRD: Hybrid AI Trading Agent with ERC-8004
 
-# **Product Requirement Document (PRD)**
-
-**Project Name:** Balanced Hybrid AI Trading Agent
-**Hackathon:** AI Trading Agents with ERC-8004 – lablab.ai / Surge
-**Pre-Hackathon Phase:** March 2026
+**Hackathon**: AI Trading Agents with ERC-8004 (lablab.ai / Surge)
+**Updated**: 2026-04-07 | **Status**: Pre-Hackathon (paper trading)
 
 ---
 
-## **1. Project Overview**
+## What Is This?
 
-This project is a **trustworthy, autonomous AI trading agent** designed for the ERC-8004 hackathon.
+An autonomous crypto trading agent that makes **verifiable, risk-managed decisions** by combining rule-based strategies with AI confidence scoring. Every trade is cryptographically hashed using the **ERC-8004 standard**, creating an auditable proof trail that can later be submitted on-chain.
 
-The agent will:
-
-* Trade crypto in a **balanced, risk-managed way**
-* Combine **rule-based trading logic** with **AI reasoning** for improved decision-making
-* Simulate proof and validation **pre-hackathon** to mimic ERC-8004 registries
-* Be modular, Python-based, and testable in VS Code
-* Generate dashboards to track performance, trades, and risk
-
-**Goal:** Build a tested, deployable agent before hackathon so integration with Surge sandbox and ERC-8004 is quick and smooth.
+No real money is involved. This is a paper-trading simulation using historical Binance data.
 
 ---
 
-## **2. Key Features**
-
-| Feature                   | Description                                                                    | Pre-Hackathon Status |
-| ------------------------- | ------------------------------------------------------------------------------ | -------------------- |
-| Hybrid Trading Logic      | Momentum + Mean-Reversion + Yield Module                                       | Fully implemented    |
-| AI Prediction             | ML/LLM predicts trend confidence and adjusts decision                          | Fully implemented    |
-| Rule-Based Logic          | Moving averages, RSI, support/resistance, liquidity filters                    | Fully implemented    |
-| Risk Management           | Stop-loss, take-profit, daily loss limit, max position size, volatility filter | Fully implemented    |
-| Trade Simulation          | Paper trading using historical price data                                      | Fully implemented    |
-| Dashboard                 | Shows portfolio value, PnL, trade history, validation logs, risk metrics       | Fully implemented    |
-| Validation Simulation     | Hash-based proof of decisions for ERC-8004 compatibility                       | Fully implemented    |
-| Multi-Module Coordination | Central agent coordinates all sub-modules for final trading decision           | Fully implemented    |
-
----
-
-## **3. Trading Strategy**
-
-### 3.1 Momentum Module
-
-* Detects trends using **moving averages** and **volume filters**
-* Buys in rising trends, sells in declining trends
-
-### 3.2 Mean-Reversion Module
-
-* Trades when prices are far from historical averages
-* Buys undervalued assets, sells overvalued
-
-### 3.3 Yield Optimization Module
-
-* Optional for pre-hackathon: monitors liquidity pools / staking opportunities
-* Allocates funds to maximize passive returns
-
-### 3.4 AI Reasoning
-
-* Evaluates all module outputs and predicts likelihood of success
-* Confirms or adjusts rule-based recommendations
-
-### 3.5 Risk Rules
-
-* Stop-loss: 3–5%
-* Take-profit: 5–7%
-* Max position size: 30% of portfolio
-* Daily loss cap: 10%
-* Volatility filter: avoid high-risk tokens
-
----
-
-## **4. Architecture Overview**
+## How It Works
 
 ```
-                 +----------------+
-                 | Market Data API|
-                 +--------+-------+
-                          |
-           +--------------v--------------+
-           |      Data Preprocessing     |
-           | - Calculate indicators      |
-           | - Normalize data            |
-           +--------------+--------------+
-                          |
-         +----------------v----------------+
-         |          Hybrid Agent           |
-         | - Momentum Module               |
-         | - Mean-Reversion Module         |
-         | - Yield Module                  |
-         | - AI Prediction Layer           |
-         | - Risk Management Module        |
-         +----------------+----------------+
-                          |
-         +----------------v----------------+
-         | Trade Simulation / Paper Trading|
-         | - Execute trades on virtual funds|
-         | - Record trade logs              |
-         +----------------+----------------+
-                          |
-                 +--------v--------+
-                 |  Validation Logs|
-                 | - Hash-based proof|
-                 +--------+--------+
-                          |
-                 +--------v--------+
-                 | Dashboard / GUI |
-                 | - PnL / Portfolio|
-                 | - Risk Metrics  |
-                 | - Trade Signals |
-                 +----------------+
+Market Data (CSV) 
+  -> Compute Indicators (EMA, RSI, MACD, ATR, Bollinger Bands, ADX)
+  -> Detect Market Regime (trending / ranging / choppy)
+  -> Generate Signals (momentum in trends, mean-reversion in ranges)
+  -> Score Confidence (regime-weighted blend of both strategies)
+  -> Validate Risk (8 checks: loss caps, sizing, drawdown, volatility)
+  -> Execute Paper Trade (if all checks pass)
+  -> Log SHA256 Proof Hash (ERC-8004: Identity + Reputation + Intent + Validation)
+  -> Display on Dashboard (Streamlit)
+```
+
+**Key rule**: No single signal can trigger a trade. Both strategies must contribute, risk manager must approve, and everything gets hashed.
+
+---
+
+## Core Components
+
+| Module | What It Does |
+|--------|-------------|
+| `modules/strategy.py` | Detects regime, generates momentum + mean-reversion signals |
+| `modules/confidence_scoring.py` | Blends signals with regime-aware weights (85/15 trending, 15/85 ranging) |
+| `risk/risk_manager.py` | 8-layer validation: confidence gate, loss caps, cooldowns, ATR-based SL/TP, drawdown defense |
+| `validation/proof_logger.py` | Builds ERC-8004 records (Identity, Reputation, Intent, Validation) and SHA256 hashes them |
+| `dashboard/dashboard.py` | Streamlit UI showing portfolio KPIs, trade history, regime charts, proof audit |
+| `utils/indicators.py` | Precomputes all technical indicators once, O(1) per-bar lookup |
+| `main.py` | Orchestrates the full pipeline: load -> compute -> signal -> risk -> trade -> log |
+
+---
+
+## Risk Management
+
+Every trade passes through these checks in order:
+
+1. Confidence >= 0.67 (raised to 0.80 in high volatility)
+2. Daily loss < 8% of portfolio
+3. Not in cooldown (8-bar pause after 3 consecutive stop-losses)
+4. Position size within 30% cap, cash available
+5. Regime-adjusted sizing (choppy: 40%, defensive: 50%)
+6. Drawdown defense (50% size cut after 15% drawdown from peak)
+7. ATR-based dynamic stop-loss and take-profit
+8. Risk-per-trade budget cap
+
+If any check fails, the trade is rejected and the reason is logged.
+
+---
+
+## ERC-8004 Proof System
+
+Every decision produces a record with four registries:
+
+- **Identity**: agent ID, strategy version, trading pair
+- **Reputation**: portfolio value, PnL, win rate, drawdown
+- **Intent** (EIP-712 style): action, price, size, SL/TP, confidence
+- **Validation**: SHA256 hash of the canonical JSON record
+
+Proofs are append-only (`proof_log.jsonl`). Tamper detection built in. Designed for easy migration to on-chain submission via Web3.
+
+---
+
+## Tech Stack
+
+Python 3.10+ | pandas, numpy | Streamlit | pytest | hashlib (stdlib)
+
+No external AI/ML dependencies. Fully deterministic and reproducible.
+
+---
+
+## Data
+
+7 datasets: BTC, ETH, SOL, AVAX (4h candles from Binance) + 3 historical test sets. Synthetic data fallback via Geometric Brownian Motion if no CSV available.
+
+**Results so far**: 3,000+ trades executed, 3,200+ proof records generated.
+
+---
+
+## Current Status
+
+**Working**: Full pipeline, regime detection, dual strategies, confidence scoring, 8-layer risk, ERC-8004 proofs, dashboard.
+
+**Needs fixing**: Test suite (broken after module consolidation), `strategy.py` not yet git-tracked.
+
+---
+
+## Project Structure
+
+```
+├── main.py                  # Entry point
+├── config.py                # All tunable parameters (dataclasses)
+├── modules/
+│   ├── strategy.py          # Regime detection + momentum + mean-reversion
+│   ├── confidence_scoring.py
+│   └── ai_predictor.py      # Supplementary indicator scoring
+├── risk/risk_manager.py     # 8-layer trade validation
+├── validation/proof_logger.py  # ERC-8004 hashing + logging
+├── dashboard/dashboard.py   # Streamlit UI
+├── utils/
+│   ├── helpers.py           # Indicator math (SMA, EMA, RSI, ATR, MACD, ADX, etc.)
+│   ├── indicators.py        # Bulk precomputation
+│   └── data_loader.py       # CSV + synthetic data loading
+├── tests/                   # pytest suite
+└── data/                    # 7 OHLCV datasets + trade/proof logs
 ```
 
 ---
 
-## **5. Technology Stack**
+## Quick Start
 
-| Component          | Technology                                              |
-| ------------------ | ------------------------------------------------------- |
-| Programming        | Python                                                  |
-| IDE                | VS Code                                                 |
-| AI Layer           | ML/LLM (Claude-assisted coding)                         |
-| Data Sources       | Historical crypto prices (CoinGecko, Aerodrome testnet) |
-| Dashboard          | Streamlit / Flask                                       |
-| Validation         | Hash-based simulation (pre-hackathon)                   |
-| Trading Simulation | Paper trading engine                                    |
+```bash
+pip install -r requirements.txt   # pandas, numpy, streamlit, pytest
+python main.py                    # Run the trading simulation
+streamlit run dashboard/dashboard.py  # Launch the dashboard
+pytest tests/ -v                  # Run tests
+```
 
 ---
 
-## **6. Project Scope Pre-Hackathon**
+## Roadmap
 
-**Modules to implement now:**
-
-1. Market data fetching & preprocessing
-2. Momentum, mean-reversion, yield modules
-3. Hybrid AI + rule-based decision-making
-4. Risk management rules & enforcement
-5. Trade simulation engine
-6. Validation hash logging
-7. Dashboard for monitoring & reporting
-
----
-
-## **7. Post-Hackathon Integration Plan**
-
-1. Register agent with ERC-8004 Identity Registry
-2. Connect to Surge Sandbox / Capital Vault
-3. Implement on-chain validation registry integration
-4. Deploy live trading using Risk Router
-5. Monitor leaderboard, update reputation scores
-
----
-
-## **8. Success Criteria (Pre-Hackathon)**
-
-* Agent executes trades in paper trading simulation without errors
-* Risk rules enforced correctly
-* Dashboard shows correct trade logs, PnL, and risk metrics
-* Validation logs record decisions correctly
-* Hybrid AI + rule-based module functions cohesively
-
----
-
-## **9. Notes / Recommendations**
-
-* Focus on **robustness and modularity** pre-hackathon
-* Keep code structured for **easy blockchain integration** later
-* Paper trading + historical backtesting ensures better leaderboard performance
-* Claude will be used for **full project generation** including AI logic, modules, simulation, and dashboard
-
+| Phase | Focus |
+|-------|-------|
+| **Pre-Hackathon** (now) | Fix tests, stabilize, backtest across all datasets |
+| **Hackathon** | On-chain proof submission (Web3), live data feed, multi-pair trading, demo |
+| **Post-Hackathon** | ML prediction layer, Docker deployment, alert system |
