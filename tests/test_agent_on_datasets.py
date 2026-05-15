@@ -20,10 +20,9 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import CONFIG
-from modules.momentum import generate_signal as momentum_signal
-from modules.mean_reversion import generate_signal as mean_reversion_signal
+from modules.strategy import generate_strategy_signal
 from modules.confidence_scoring import compute_confidence, get_execution_threshold
-from utils.indicators import compute_indicators
+from utils.indicators import indicators_at, precompute_all_indicators
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO,
@@ -58,10 +57,10 @@ def _detect_regime(ind) -> str:
     if ind is None:
         return "unclear"
 
-    spread = abs(float(ind.ema_spread_norm))
+    spread = abs(float(ind.ema_spread_pct))
     atr_norm = float(ind.atr_norm_14) if ind.atr_norm_14 is not None else 0.0
     if spread >= 0.003 and atr_norm <= 0.03:
-        return "trending_up" if ind.ema_spread_norm > 0 else "trending_down"
+        return "trending_up" if ind.ema_spread_pct > 0 else "trending_down"
     if spread <= 0.0018 and atr_norm <= 0.035:
         return "choppy"
     return "unclear"
@@ -131,8 +130,11 @@ def backtest_on_dataset(csv_file: Path, dataset_name: str) -> BacktestResults:
     
     df["datetime"] = pd.to_datetime(df["datetime"])
     df = df.sort_values("datetime").reset_index(drop=True)
-    
+
     logger.info(f"  Loaded {len(df)} candles")
+
+    # Precompute indicators once for the full series.
+    pre = precompute_all_indicators(df, CONFIG.strategy)
     
     # Generate signals and execute trades
     trades = []  # List of (entry_idx, exit_idx, entry_price, exit_price, profit)
@@ -146,37 +148,22 @@ def backtest_on_dataset(csv_file: Path, dataset_name: str) -> BacktestResults:
     last_closed_side = 0
     
     for idx in range(50, len(df)):
-        # Get data up to this bar
-        df_slice = df.iloc[:idx+1].copy()
-        
-        # Generate indicators and regime once per bar.
-        ind = compute_indicators(
-            df_slice,
-            ema_fast_period=9,
-            ema_slow_period=21,
-            rsi_period=14,
-            atr_period=14,
-        )
+        ind = indicators_at(pre, idx)
         atr_norm = float(ind.atr_norm_14) if ind and ind.atr_norm_14 is not None else 0.015
         regime = _detect_regime(ind)
 
-        # Generate strategy signals.
+        # Generate strategy signals via the unified module.
         try:
-            mom_result = momentum_signal(df_slice)
-            mom_signal_val = mom_result.get("signal", 0) if mom_result else 0
+            strat = generate_strategy_signal(pre, idx, CONFIG.strategy)
+            mom_result = strat.get("momentum", {"signal": 0, "confidence": 0.0, "raw_strength": 0.0})
+            mr_result = strat.get("mean_reversion", {"signal": 0, "confidence": 0.0, "raw_strength": 0.0})
         except Exception as e:
-            logger.debug(f"Momentum signal error at {idx}: {e}")
-            mom_result = {"signal": 0, "confidence": 0.0}
-            mom_signal_val = 0
-        
-        try:
-            mr_result = mean_reversion_signal(df_slice)
-            mr_signal_val = mr_result.get("signal", 0) if mr_result else 0
-        except Exception as e:
-            logger.debug(f"MR signal error at {idx}: {e}")
-            mr_result = {"signal": 0, "confidence": 0.0}
-            mr_signal_val = 0
+            logger.debug(f"Strategy signal error at {idx}: {e}")
+            mom_result = {"signal": 0, "confidence": 0.0, "raw_strength": 0.0}
+            mr_result = {"signal": 0, "confidence": 0.0, "raw_strength": 0.0}
 
+        mom_signal_val = int(mom_result.get("signal", 0) or 0)
+        mr_signal_val = int(mr_result.get("signal", 0) or 0)
         raw_mom_signal = mom_signal_val
         raw_mr_signal = mr_signal_val
         raw_mom_conf = float(mom_result.get("confidence", 0.0) or 0.0)
@@ -204,7 +191,7 @@ def backtest_on_dataset(csv_file: Path, dataset_name: str) -> BacktestResults:
 
         exec_threshold = get_execution_threshold(atr_norm, base_threshold=0.65)
         combined_signal = 1 if action == "BUY" else -1 if action == "SELL" else 0
-        trend_strength = abs(float(ind.ema_spread_norm)) if ind is not None else 0.0
+        trend_strength = abs(float(ind.ema_spread_pct)) if ind is not None else 0.0
 
         # Strict no-trade zones for conflicting/weak signals and sideways conditions.
         strong_conflict = (

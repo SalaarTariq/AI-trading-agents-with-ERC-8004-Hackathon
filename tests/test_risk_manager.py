@@ -47,14 +47,16 @@ class TestConfidenceThreshold:
         assert any("Confidence" in r for r in result.reasons)
 
     def test_exact_threshold_approved(self, default_portfolio):
-        # Trending regime has threshold 0.60, so 0.60 passes
+        # Effective floor is max(cfg.min_confidence, regime.conf_threshold);
+        # lower both so 0.60 passes.
         regime_cfg = RegimeConfig(
             trending_up=RegimeParams(conf_threshold=0.60, position_mult=1.0,
                                      sl_atr_mult=2.0, tp_atr_mult=3.0),
         )
+        cfg = RiskConfig(min_confidence=0.60)
         result = check_risk(
             signal="BUY", confidence=0.60, entry_price=3000.0,
-            requested_size=10_000, portfolio=default_portfolio,
+            requested_size=10_000, portfolio=default_portfolio, cfg=cfg,
             regime="trending_up", regime_cfg=regime_cfg,
         )
         assert result.approved is True

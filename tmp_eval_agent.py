@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 from tests.test_agent_on_datasets import backtest_on_dataset, get_last_trades
 
-for name in ["tests.test_agent_on_datasets", "modules.momentum", "modules.mean_reversion", "root"]:
+for name in ["tests.test_agent_on_datasets", "modules.strategy", "modules.confidence_scoring", "root"]:
     logging.getLogger(name).setLevel(logging.CRITICAL)
 
 rows = []
