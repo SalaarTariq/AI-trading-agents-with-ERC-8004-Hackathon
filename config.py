@@ -137,6 +137,9 @@ class RiskConfig:
 
     consecutive_loss_pause: int = 3
 
+    # Multiplier applied to position size while defensive mode is active.
+    defensive_size_mult: float = 0.50
+
 
 @dataclass
 class AppConfig:
@@ -151,6 +154,7 @@ class AppConfig:
     log_level: str = "INFO"
     data_dir: str = "data"
     proof_log_path: str = "validation/proof_log.jsonl"
+    dashboard_refresh_seconds: int = 5
 
 
 CONFIG = AppConfig()
