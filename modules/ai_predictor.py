@@ -15,7 +15,7 @@ import logging
 import numpy as np
 import pandas as pd
 
-from utils.indicators import compute_indicators
+from utils.indicators import indicators_at, precompute_all_indicators
 
 logger = logging.getLogger(__name__)
 
@@ -43,28 +43,35 @@ def generate_signal_from_strategy_outputs(
     Returns:
         {signal, confidence, metadata, prob_up, rolling_accuracy}
     """
-    ind = compute_indicators(df) if df is not None and len(df) > 28 else None
+    ind = None
+    close_price = 0.0
+    if df is not None and len(df) > 28:
+        pre = precompute_all_indicators(df)
+        ind = indicators_at(pre, len(df) - 1)
+        close_price = float(df["close"].iloc[-1])
 
     # Indicator agreement score [-1, 1]
     indicator_score = 0.0
     ind_details: dict[str, float] = {}
 
     if ind is not None:
-        # EMA spread: positive = bullish
-        ema_contrib = float(np.clip(ind.ema_spread_norm, -1.0, 1.0))
-        indicator_score += ema_contrib * 0.4
-        ind_details["ema_spread_norm"] = round(ema_contrib, 4)
+        # EMA spread: positive = bullish. Scale ema_spread_pct (~[-0.02, 0.02])
+        # into [-1, 1] using a 2% reference band.
+        ema_norm = float(np.clip(ind.ema_spread_pct / 0.02, -1.0, 1.0))
+        indicator_score += ema_norm * 0.4
+        ind_details["ema_spread_norm"] = round(ema_norm, 4)
 
-        # MACD histogram: positive = bullish
-        macd_contrib = float(np.clip(ind.macd_hist_norm, -1.0, 1.0))
-        indicator_score += macd_contrib * 0.3
-        ind_details["macd_hist_norm"] = round(macd_contrib, 4)
+        # MACD histogram normalized by price; scale by 0.5% reference band.
+        macd_pct = (ind.macd_hist / close_price) if close_price > 0 else 0.0
+        macd_norm = float(np.clip(macd_pct / 0.005, -1.0, 1.0))
+        indicator_score += macd_norm * 0.3
+        ind_details["macd_hist_norm"] = round(macd_norm, 4)
 
         # RSI zone: use as mean-reversion hint only when EMA/MACD agree.
         # If EMA and MACD are both negative (bearish), RSI oversold is NOT bullish.
         rsi_val = ind.rsi_14
-        ema_bearish = ema_contrib < -0.1
-        ema_bullish = ema_contrib > 0.1
+        ema_bearish = ema_norm < -0.1
+        ema_bullish = ema_norm > 0.1
         if rsi_val < 35:
             # Oversold: bullish only if trend supports it
             rsi_contrib = (35 - rsi_val) / 35 if not ema_bearish else 0.0

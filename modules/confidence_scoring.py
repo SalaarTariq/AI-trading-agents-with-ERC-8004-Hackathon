@@ -19,10 +19,16 @@ def _clip01(value: float) -> float:
 def get_execution_threshold(
     current_atr_norm: float | None,
     cfg: SignalConfig | None = None,
+    *,
+    base_threshold: float | None = None,
 ) -> float:
-    """Return execution threshold with a mild volatility uplift."""
+    """Return execution threshold with a mild volatility uplift.
+
+    ``base_threshold`` is accepted for backward compatibility with older callers
+    that override the base directly instead of passing a full SignalConfig.
+    """
     cfg = cfg or CONFIG.signal
-    base = cfg.execute_confidence_threshold
+    base = base_threshold if base_threshold is not None else cfg.execute_confidence_threshold
 
     if current_atr_norm is None:
         return base
@@ -85,7 +91,10 @@ def combine_signals(
     action = "BUY" if buy_score > sell_score else "SELL"
     dominant = buy_score if action == "BUY" else sell_score
 
-    confidence = 0.42 + 0.45 * _clip01(dominant)
+    # Scale base with dominant strength so near-zero signals can't ride
+    # agreement/regime bonuses up to the execution threshold.
+    dom = _clip01(dominant)
+    confidence = 0.30 + 0.55 * dom
 
     if m_sig != 0 and r_sig != 0 and m_sig == r_sig:
         confidence += cfg.agreement_bonus

@@ -89,7 +89,7 @@ def _momentum_signal(row: pd.Series, regime: str, cfg: StrategyConfig) -> dict:
     rsi_center = 1.0 - min(abs(rsi_val - 50.0) / 5.0, 1.0)
 
     raw_strength = float(np.clip(0.50 * spread_strength + 0.35 * macd_strength + 0.15 * rsi_center, 0.0, 1.0))
-    confidence = float(np.clip(0.50 + 0.35 * raw_strength, 0.0, 0.90))
+    confidence = float(np.clip(0.50 + 0.50 * raw_strength, 0.0, 1.0))
 
     return {
         "signal": signal,
@@ -142,9 +142,9 @@ def _mean_reversion_signal(row: pd.Series, regime: str, cfg: StrategyConfig) -> 
 
     velocity_bonus = 0.0
     if signal == 1 and rsi_val < 40.0 and rsi_delta_3 >= cfg.meanrev_velocity_bonus_trigger:
-        velocity_bonus = min(0.10, 0.02 * (rsi_delta_3 - cfg.meanrev_velocity_bonus_trigger + 1.0))
+        velocity_bonus = min(0.10, 0.02 * (rsi_delta_3 - cfg.meanrev_velocity_bonus_trigger))
 
-    confidence = float(np.clip(0.44 + 0.34 * raw_strength + velocity_bonus, 0.0, 0.88))
+    confidence = float(np.clip(0.44 + 0.46 * raw_strength + velocity_bonus, 0.0, 1.0))
 
     return {
         "signal": signal,
