@@ -88,7 +88,11 @@ def check_risk(
 
     # 4) Position cap and cash cap
     max_position_size = portfolio.total_value * cfg.max_position_pct
-    adjusted_size = min(adjusted_size, max_position_size)
+    if adjusted_size > max_position_size:
+        warnings.append(
+            f"Requested size exceeds max_position_pct ({cfg.max_position_pct:.0%}); clamped"
+        )
+        adjusted_size = max_position_size
     adjusted_size = min(adjusted_size, portfolio.cash)
 
     # 5) Regime/volatility sizing controls
@@ -110,16 +114,23 @@ def check_risk(
         if drawdown >= cfg.max_drawdown_pct:
             portfolio.is_defensive = True
         if portfolio.is_defensive:
-            adjusted_size *= 0.50
-            warnings.append("Defensive mode active; size reduced by 50%")
+            adjusted_size *= cfg.defensive_size_mult
+            warnings.append(
+                f"Defensive mode active; size reduced by {(1 - cfg.defensive_size_mult) * 100:.0f}%"
+            )
 
     # 7) ATR-based SL/TP (risk-first asymmetric R:R)
     if cfg.use_dynamic_sl_tp and atr_val and atr_val > 0:
-        sl_dist = cfg.atr_sl_multiplier * atr_val
-        tp_dist = cfg.atr_tp_multiplier * atr_val
-
-        sl_dist = min(max(sl_dist, entry_price * cfg.min_sl_pct), entry_price * cfg.max_sl_pct)
-        tp_dist = min(max(tp_dist, entry_price * cfg.min_tp_pct), entry_price * cfg.max_tp_pct)
+        sl_dist = float(np.clip(
+            cfg.atr_sl_multiplier * atr_val,
+            entry_price * cfg.min_sl_pct,
+            entry_price * cfg.max_sl_pct,
+        ))
+        tp_dist = float(np.clip(
+            cfg.atr_tp_multiplier * atr_val,
+            entry_price * cfg.min_tp_pct,
+            entry_price * cfg.max_tp_pct,
+        ))
     else:
         sl_dist = entry_price * cfg.stop_loss_pct
         tp_dist = entry_price * cfg.take_profit_pct
