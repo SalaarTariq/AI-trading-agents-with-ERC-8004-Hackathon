@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from config import SignalConfig, CONFIG
+from config import CONFIG, RegimeConfig, SignalConfig
 
 
 def _clip01(value: float) -> float:
@@ -22,10 +22,10 @@ def get_execution_threshold(
     *,
     base_threshold: float | None = None,
 ) -> float:
-    """Return execution threshold with a mild volatility uplift.
+    """Return the execution threshold with a volatility uplift.
 
-    ``base_threshold`` is accepted for backward compatibility with older callers
-    that override the base directly instead of passing a full SignalConfig.
+    ``base_threshold`` is accepted for callers that need to override the
+    base directly (e.g. a regime-specific floor).
     """
     cfg = cfg or CONFIG.signal
     base = base_threshold if base_threshold is not None else cfg.execute_confidence_threshold
@@ -41,10 +41,37 @@ def get_execution_threshold(
     return base
 
 
+def effective_confidence_threshold(
+    *,
+    base: float,
+    current_atr_norm: float | None,
+    signal_cfg: SignalConfig | None = None,
+) -> float:
+    """Apply the shared volatility uplift to a caller-supplied base.
+
+    The base is whatever the caller considers authoritative:
+
+    - ``combine_signals`` passes its own ``execute_confidence_threshold``
+      (signal-quality view).
+    - The risk manager passes ``max(min_confidence, regime.conf_threshold)``
+      (trade-safety view).
+
+    Volatility uplift logic lives here so the two paths can't drift on
+    *how* they react to high-ATR conditions, only on *what* base they
+    consider acceptable in calm markets.
+    """
+    return get_execution_threshold(
+        current_atr_norm,
+        signal_cfg or CONFIG.signal,
+        base_threshold=base,
+    )
+
+
 def combine_signals(
     strategy_out: dict,
     current_atr_norm: float | None,
     cfg: SignalConfig | None = None,
+    regime_cfg: RegimeConfig | None = None,
 ) -> dict:
     """Combine momentum + mean-reversion into one action/confidence output."""
     cfg = cfg or CONFIG.signal
@@ -110,7 +137,16 @@ def combine_signals(
 
     confidence = _clip01(confidence)
 
-    threshold = get_execution_threshold(current_atr_norm, cfg)
+    regime_cfg = regime_cfg or CONFIG.regime
+    base_threshold = max(
+        cfg.execute_confidence_threshold,
+        regime_cfg.get(regime).conf_threshold,
+    )
+    threshold = effective_confidence_threshold(
+        base=base_threshold,
+        current_atr_norm=current_atr_norm,
+        signal_cfg=cfg,
+    )
     has_support = False
     if action == "BUY":
         has_support = (
@@ -176,4 +212,3 @@ def compute_confidence(
 
     combined = combine_signals(out, current_atr_norm=current_atr_norm, cfg=local_cfg)
     return float(combined["confidence"]), str(combined["action"])
-
