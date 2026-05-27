@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from config import SignalConfig, CONFIG
+from config import CONFIG, RegimeConfig, SignalConfig
 
 
 def _clip01(value: float) -> float:
@@ -22,10 +22,10 @@ def get_execution_threshold(
     *,
     base_threshold: float | None = None,
 ) -> float:
-    """Return execution threshold with a mild volatility uplift.
+    """Return the execution threshold with a volatility uplift.
 
-    ``base_threshold`` is accepted for backward compatibility with older callers
-    that override the base directly instead of passing a full SignalConfig.
+    ``base_threshold`` is accepted for callers that need to override the
+    base directly (e.g. a regime-specific floor).
     """
     cfg = cfg or CONFIG.signal
     base = base_threshold if base_threshold is not None else cfg.execute_confidence_threshold
@@ -41,12 +41,63 @@ def get_execution_threshold(
     return base
 
 
+def effective_confidence_threshold(
+    *,
+    base: float,
+    current_atr_norm: float | None,
+    signal_cfg: SignalConfig | None = None,
+) -> float:
+    """Apply the shared volatility uplift to a caller-supplied base.
+
+    The base is whatever the caller considers authoritative:
+
+    - ``combine_signals`` passes its own ``execute_confidence_threshold``
+      (signal-quality view).
+    - The risk manager passes ``max(min_confidence, regime.conf_threshold)``
+      (trade-safety view).
+
+    Volatility uplift logic lives here so the two paths can't drift on
+    *how* they react to high-ATR conditions, only on *what* base they
+    consider acceptable in calm markets.
+    """
+    return get_execution_threshold(
+        current_atr_norm,
+        signal_cfg or CONFIG.signal,
+        base_threshold=base,
+    )
+
+
+def _ai_signal_int(ai_out: dict | None) -> int:
+    """Map an ai_predictor output to {-1, 0, +1}."""
+    if not ai_out:
+        return 0
+    sig = str(ai_out.get("signal", "HOLD")).upper()
+    if sig == "BUY":
+        return 1
+    if sig == "SELL":
+        return -1
+    return 0
+
+
 def combine_signals(
     strategy_out: dict,
     current_atr_norm: float | None,
     cfg: SignalConfig | None = None,
+    regime_cfg: RegimeConfig | None = None,
+    ai_out: dict | None = None,
 ) -> dict:
-    """Combine momentum + mean-reversion into one action/confidence output."""
+    """Combine the three voters into one action/confidence output.
+
+    Voters:
+    - momentum (rule)
+    - mean-reversion (rule)
+    - ai_predictor (deterministic rule-based scorer; optional, weight in
+      ``SignalConfig.ai_predictor_weight``).
+
+    The AI voter is included to satisfy the hybrid-consensus requirement
+    described in ``.claude/rules/01-project-context.md``. Its weight is
+    deliberately small so it cannot override two agreeing rule voters.
+    """
     cfg = cfg or CONFIG.signal
 
     regime = str(strategy_out.get("regime", "choppy"))
@@ -58,12 +109,22 @@ def combine_signals(
     m_strength = _clip01(float(mom.get("raw_strength", 0.0)))
     r_strength = _clip01(float(mr.get("raw_strength", 0.0)))
 
+    ai_enabled = cfg.use_ai_predictor and ai_out is not None
+    a_sig = _ai_signal_int(ai_out) if ai_enabled else 0
+    a_strength = _clip01(float(ai_out.get("confidence", 0.0))) if ai_enabled else 0.0
+
     if regime in ("trending_up", "trending_down"):
         w_mom, w_mr = cfg.trend_momentum_weight, cfg.trend_meanrev_weight
     elif regime == "ranging":
         w_mom, w_mr = cfg.range_momentum_weight, cfg.range_meanrev_weight
     else:
         w_mom, w_mr = cfg.choppy_momentum_weight, cfg.choppy_meanrev_weight
+
+    # Renormalize rule weights down to leave room for the AI voter.
+    w_ai = cfg.ai_predictor_weight if ai_enabled else 0.0
+    scale = max(0.0, 1.0 - w_ai)
+    w_mom *= scale
+    w_mr *= scale
 
     buy_score = 0.0
     sell_score = 0.0
@@ -77,15 +138,20 @@ def combine_signals(
     elif r_sig == -1:
         sell_score += w_mr * r_strength
 
+    if a_sig == 1:
+        buy_score += w_ai * a_strength
+    elif a_sig == -1:
+        sell_score += w_ai * a_strength
+
     if buy_score == 0.0 and sell_score == 0.0:
         return {
             "action": "HOLD",
             "confidence": 0.0,
             "score": 0.0,
             "regime": regime,
-            "details": {"momentum": mom, "mean_reversion": mr},
-            "buy_agreement": int(m_sig == 1) + int(r_sig == 1),
-            "sell_agreement": int(m_sig == -1) + int(r_sig == -1),
+            "details": {"momentum": mom, "mean_reversion": mr, "ai": ai_out or {}},
+            "buy_agreement": int(m_sig == 1) + int(r_sig == 1) + int(a_sig == 1),
+            "sell_agreement": int(m_sig == -1) + int(r_sig == -1) + int(a_sig == -1),
         }
 
     action = "BUY" if buy_score > sell_score else "SELL"
@@ -99,6 +165,12 @@ def combine_signals(
     if m_sig != 0 and r_sig != 0 and m_sig == r_sig:
         confidence += cfg.agreement_bonus
 
+    # Small extra nudge when the AI voter also agrees with the action.
+    if ai_enabled and (
+        (action == "BUY" and a_sig == 1) or (action == "SELL" and a_sig == -1)
+    ):
+        confidence += cfg.ai_agreement_bonus
+
     if regime in ("trending_up", "trending_down") and ((m_sig == 1 and action == "BUY") or (m_sig == -1 and action == "SELL")):
         confidence += cfg.regime_quality_bonus
     if regime == "ranging" and ((r_sig == 1 and action == "BUY") or (r_sig == -1 and action == "SELL")):
@@ -110,7 +182,16 @@ def combine_signals(
 
     confidence = _clip01(confidence)
 
-    threshold = get_execution_threshold(current_atr_norm, cfg)
+    regime_cfg = regime_cfg or CONFIG.regime
+    base_threshold = max(
+        cfg.execute_confidence_threshold,
+        regime_cfg.get(regime).conf_threshold,
+    )
+    threshold = effective_confidence_threshold(
+        base=base_threshold,
+        current_atr_norm=current_atr_norm,
+        signal_cfg=cfg,
+    )
     has_support = False
     if action == "BUY":
         has_support = (
@@ -140,40 +221,14 @@ def combine_signals(
                 "signal": r_sig,
                 "raw_strength": round(r_strength, 4),
             },
+            "ai": {
+                "signal": a_sig,
+                "raw_strength": round(a_strength, 4),
+                "enabled": ai_enabled,
+            },
         },
-        "buy_agreement": int(m_sig == 1) + int(r_sig == 1),
-        "sell_agreement": int(m_sig == -1) + int(r_sig == -1),
+        "buy_agreement": int(m_sig == 1) + int(r_sig == 1) + int(a_sig == 1),
+        "sell_agreement": int(m_sig == -1) + int(r_sig == -1) + int(a_sig == -1),
     }
 
-
-def compute_confidence(
-    momentum_out: dict,
-    mean_rev_out: dict,
-    ai_out: dict | None = None,
-    current_atr_norm: float | None = None,
-    atr_percentile_rank: float | None = None,
-    *,
-    conf_threshold: float = 0.67,
-    regime: str = "choppy",
-    **_: object,
-) -> tuple[float, str]:
-    """Compatibility shim for older callers expecting `(confidence, action)`.
-
-    The cleaned architecture uses `combine_signals`, but this wrapper keeps
-    the old interface operational for transitional scripts.
-    """
-    del ai_out
-
-    out = {
-        "regime": regime,
-        "momentum": momentum_out,
-        "mean_reversion": mean_rev_out,
-        "atr_percentile_rank": atr_percentile_rank if atr_percentile_rank is not None else 0.50,
-    }
-    # Temporary override without mutating global config.
-    local_cfg = SignalConfig(**vars(CONFIG.signal))
-    local_cfg.execute_confidence_threshold = conf_threshold
-
-    combined = combine_signals(out, current_atr_norm=current_atr_norm, cfg=local_cfg)
-    return float(combined["confidence"]), str(combined["action"])
 

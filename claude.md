@@ -2,92 +2,109 @@
 
 ## Project Overview
 
-- **Goal**: Build a trustworthy, autonomous hybrid AI trading agent for crypto.
-- **Hackathon**: AI Trading Agents with ERC-8004 - lablab.ai / Surge
-- **Modules**: momentum trading, mean-reversion trading, yield optimizer, AI reasoning
-- **Risk Management**: stop-loss, take-profit, max position, daily loss caps
-- **Validation**: hash-based proof logs (simulating ERC-8004 validation)
-- **Dashboard**: Streamlit/Flask visualization
-- **Execution**: Hybrid AI + rule-based decision logic
-- **Pre-Hackathon Objective**: Paper-trade using historical/sandbox data
+- **Goal**: Build a trustworthy, autonomous hybrid trading agent for crypto.
+- **Hackathon**: AI Trading Agents with ERC-8004 — lablab.ai / Surge.
+- **Decision model**: regime-aware blend of momentum + mean-reversion +
+  a deterministic AI-style indicator scorer.
+- **Risk Management**: confidence gate, ATR-based SL/TP, position caps,
+  daily loss cap, drawdown defense, consecutive-loss cooldown,
+  trailing stop.
+- **Validation**: SHA256 proof hashes over canonical-JSON decision
+  records, written append-only to `validation/proof_log.jsonl`
+  (ERC-8004 envelope: identity / reputation / intent / validation).
+- **Dashboard**: Streamlit visualization reading the proof and trade
+  JSONLs.
+- **Execution**: Paper-trading only — no real orders, no API keys.
 
 ## Architecture
 
 ```
-balanced_hybrid_ai_agent/
-├── main.py                    # Entry point - orchestrates all modules
-├── config/
-│   └── config.yaml            # Trading parameters, risk thresholds, module toggles
+.
+├── main.py                    # Thin CLI wrapper around simulation.run_paper_trading
+├── config.py                  # All tunable parameters as dataclasses (Portfolio, Strategy, Signal, Risk, Regime)
 ├── modules/
-│   ├── momentum.py            # Momentum trading strategy
-│   ├── mean_reversion.py      # Mean-reversion trading strategy
-│   ├── yield_optimizer.py     # Yield optimization strategy
-│   ├── ai_predictor.py        # AI-based prediction (weighted ensemble)
-│   └── strategy_manager.py    # Combines all modules into final trade signal
+│   ├── strategy.py            # Regime detection + momentum + mean-reversion signals
+│   ├── confidence_scoring.py  # combine_signals, effective_confidence_threshold (single source)
+│   └── ai_predictor.py        # Deterministic indicator-agreement scorer (3rd voter)
 ├── risk/
-│   └── risk_manager.py        # Risk management and trade gating
+│   └── risk_manager.py        # check_risk (decomposed gates+sizers), check_trailing_stop, update_after_trade
 ├── simulation/
-│   └── paper_trader.py        # Executes trades with virtual funds and logs PnL
+│   ├── paper_trader.py        # PaperTrader, Position, TradeRecord, run_paper_trading, required_warmup_bars
+│   └── __init__.py
 ├── validation/
-│   └── proof_logger.py        # SHA256 hash-based proof logging (ERC-8004 style)
-├── dashboard/
-│   └── dashboard.py           # Streamlit/Flask visualization
+│   ├── proof_logger.py        # SHA256 over canonical JSON, ERC-8004 record wrapper
+│   └── proof_log.jsonl        # Append-only proof log
 ├── utils/
-│   ├── config.py              # Configuration and constants
-│   ├── data_loader.py         # Historical/sandbox data loading
-│   ├── indicators.py          # MA, RSI, Bollinger Bands, z-score
-│   ├── helpers.py             # General helper functions
-│   └── logger.py              # Logging utility for trades and events
-├── tests/
-│   ├── test_momentum.py
-│   ├── test_mean_reversion.py
-│   ├── test_yield_optimizer.py
-│   ├── test_risk_manager.py
-│   └── test_proof_logger.py
-└── data/
-    ├── historical_prices.csv  # Sample historical crypto price data
-    └── live_prices.json       # Optional live price API cache
+│   ├── data_loader.py         # CSV loader + synthetic OHLCV generator
+│   ├── indicators.py          # precompute_all_indicators, indicators_at, Indicators dataclass
+│   └── helpers.py             # EMA/RSI/MACD/ATR/ADX/BB primitives, setup_logging
+├── dashboard/
+│   └── dashboard.py           # Streamlit dashboard reading proof_log.jsonl + trade_history.jsonl
+├── scripts/
+│   └── backtest_datasets.py   # Multi-dataset backtest harness on top of run_paper_trading
+├── tests/                     # pytest; run via: pytest tests/ -v --tb=short
+└── data/                      # OHLCV CSVs and the trade_history.jsonl log
 ```
 
-## Workflow / Execution
+The previous CLAUDE.md described a `config/config.yaml`, separate
+`modules/{momentum,mean_reversion,yield_optimizer,strategy_manager}.py`
+files, a `simulation/paper_trader.py` that did not exist, and
+`utils/{config,logger}.py`. None of those exist now; the structure
+above is the ground truth as of the last refactor.
 
-1. **Load market data** (CSV/historical prices) via `data_loader.py`
-2. **Compute indicators** via `indicators.py` (MA, RSI, Bollinger Bands, z-score)
-3. **Modules generate signals** - momentum, mean-reversion, yield
-4. **AI Predictor evaluates signals** - produces confidence score
-5. **Strategy Manager combines results** - final trade signal
-6. **Risk Manager checks signal** - validates stop-loss, max allocation, daily caps
-7. **Paper Trader executes trade** - updates portfolio, logs PnL
-8. **Proof Logger records hash** - input + decision + timestamp (ERC-8004 style)
-9. **Dashboard updates** - visualize trades, portfolio, AI reasoning
+## Decision flow
+
+1. **Load OHLCV** via `utils.data_loader.load_or_generate`.
+2. **Precompute indicators once** via `utils.indicators.precompute_all_indicators`.
+3. **Per bar**, after warmup (`simulation.required_warmup_bars`):
+   1. `modules.strategy.generate_strategy_signal` → regime + momentum + mean-reversion signals.
+   2. `modules.ai_predictor.predict_from_indicators` → third opinion (toggle: `SignalConfig.use_ai_predictor`).
+   3. `modules.confidence_scoring.combine_signals` → blended action + confidence.
+   4. `risk.risk_manager.check_risk` → gates (confidence/daily loss/cooldown) + sizers (caps/regime/vol/drawdown/risk-per-trade) + ATR SL/TP.
+   5. `validation.proof_logger.log_decision` → SHA256 proof, appended to `proof_log.jsonl`.
+   6. Open a `simulation.paper_trader.Position`; trailing stop tightens per bar.
+4. **Exit** on SL/TP touch or end-of-simulation mark-to-market.
+
+## Confidence-threshold rule
+
+There is one shared volatility uplift in
+`modules.confidence_scoring.effective_confidence_threshold`. Two callers
+provide their own base:
+
+- `combine_signals` uses `max(SignalConfig.execute_confidence_threshold, regime.conf_threshold)`.
+- `risk_manager._confidence_gate` uses `max(RiskConfig.min_confidence, regime.conf_threshold)`.
+
+Both then receive the same ATR-driven uplift, so the two gates cannot
+silently disagree on *how* to react to volatility.
 
 ## Tech Stack
 
 - Python 3.10+
-- IDE: VS Code
-- Libraries: pandas, numpy, scikit-learn, matplotlib, streamlit, hashlib, yaml, requests
-- AI Layer: Claude-generated reasoning module
-- Testing: pytest
-- Optional: Docker for isolated environment
+- Libraries: `pandas`, `numpy`, `streamlit`, `pytest`. Hashing via stdlib
+  `hashlib`. No `sklearn`/`torch` — the AI scorer is deterministic rules
+  over indicators.
 
 ## Project Instructions for Claude
 
-- Always generate modular code following Python best practices.
-- Always include risk management checks before trades.
-- Always produce validation proof for every decision.
-- Use `.claude/rules/` and `.claude/skills/` when applicable.
-- Follow the rules defined in `.claude/rules/*.md`.
-- When generating code, ensure each module is independently testable.
-- Use type hints and docstrings for all public functions.
-- Log all trade events with timestamps using Python's `logging` module.
-- Never execute real trades — this is a paper-trading simulation only.
-- Code should be fully runnable in VS Code.
-- Pre-hackathon simulation must be fully operational without blockchain.
+- Modular code; type hints on public signatures; docstrings only where
+  the *why* is non-obvious.
+- Every trade goes through the risk manager — no bypasses.
+- Every approved trade produces a proof hash.
+- Tests must run without network or API keys.
+- Never execute real trades — paper trading only.
+- Follow `.claude/rules/*.md`; risk and proof logger have a 95%+
+  coverage expectation.
 
 ## Key Design Principles
 
-1. **Hybrid Decision Making**: Every trade decision combines rule-based signals (momentum, mean-reversion) with AI predictions. Neither alone can trigger a trade.
-2. **Risk-First Architecture**: No trade executes without passing all risk management checks.
-3. **Provable Decisions**: Every decision is hashed and logged for ERC-8004 style on-chain verification.
-4. **Modularity**: Each component can be tested, replaced, or upgraded independently.
-5. **Transparency**: The dashboard provides real-time visibility into agent reasoning.
+1. **Hybrid consensus**: every approved trade has at least one of two
+   rule signals firing; the AI voter participates with bounded weight
+   (`SignalConfig.ai_predictor_weight`).
+2. **Risk-first**: risk gates are pure (no side effects beyond the
+   documented cooldown arming) and sizers are composable.
+3. **Provable decisions**: deterministic canonical JSON → SHA256 →
+   append-only JSONL.
+4. **One source for thresholds**: confidence and SL/TP rules live in
+   single functions reused by every caller.
+5. **Transparent state**: `Position` / `TradeRecord` are dataclasses,
+   not free-form dicts; logs are typed at the write site.
