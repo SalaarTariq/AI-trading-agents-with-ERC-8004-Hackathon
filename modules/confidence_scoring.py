@@ -232,33 +232,3 @@ def combine_signals(
     }
 
 
-def compute_confidence(
-    momentum_out: dict,
-    mean_rev_out: dict,
-    ai_out: dict | None = None,
-    current_atr_norm: float | None = None,
-    atr_percentile_rank: float | None = None,
-    *,
-    conf_threshold: float = 0.67,
-    regime: str = "choppy",
-    **_: object,
-) -> tuple[float, str]:
-    """Compatibility shim for older callers expecting `(confidence, action)`.
-
-    The cleaned architecture uses `combine_signals`, but this wrapper keeps
-    the old interface operational for transitional scripts.
-    """
-    del ai_out
-
-    out = {
-        "regime": regime,
-        "momentum": momentum_out,
-        "mean_reversion": mean_rev_out,
-        "atr_percentile_rank": atr_percentile_rank if atr_percentile_rank is not None else 0.50,
-    }
-    # Temporary override without mutating global config.
-    local_cfg = SignalConfig(**vars(CONFIG.signal))
-    local_cfg.execute_confidence_threshold = conf_threshold
-
-    combined = combine_signals(out, current_atr_norm=current_atr_norm, cfg=local_cfg)
-    return float(combined["confidence"]), str(combined["action"])
