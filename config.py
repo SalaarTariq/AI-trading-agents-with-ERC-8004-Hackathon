@@ -74,6 +74,12 @@ class SignalConfig:
     regime_quality_bonus: float = 0.10
     high_volatility_penalty: float = 0.20
 
+    # AI-predictor voter (third opinion). Weight is small so it cannot
+    # outvote the rule signals; disable via use_ai_predictor=False.
+    use_ai_predictor: bool = True
+    ai_predictor_weight: float = 0.20
+    ai_agreement_bonus: float = 0.05
+
 
 @dataclass
 class RegimeParams:

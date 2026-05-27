@@ -21,6 +21,7 @@ from pathlib import Path
 import pandas as pd
 
 from config import AppConfig, CONFIG, RiskConfig, StrategyConfig
+from modules.ai_predictor import predict_from_indicators
 from modules.confidence_scoring import combine_signals
 from modules.strategy import generate_strategy_signal
 from risk.risk_manager import (
@@ -280,11 +281,17 @@ class PaperTrader:
             return
 
         strategy_out = generate_strategy_signal(self.pre, idx, self.cfg.strategy)
+        ai_out = (
+            predict_from_indicators(strategy_out, ind, price)
+            if self.cfg.signal.use_ai_predictor
+            else None
+        )
         combined = combine_signals(
             strategy_out,
             current_atr_norm=ind.atr_norm_14,
             cfg=self.cfg.signal,
             regime_cfg=self.cfg.regime,
+            ai_out=ai_out,
         )
 
         action = combined["action"]

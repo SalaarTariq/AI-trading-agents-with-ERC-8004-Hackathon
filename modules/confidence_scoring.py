@@ -67,13 +67,37 @@ def effective_confidence_threshold(
     )
 
 
+def _ai_signal_int(ai_out: dict | None) -> int:
+    """Map an ai_predictor output to {-1, 0, +1}."""
+    if not ai_out:
+        return 0
+    sig = str(ai_out.get("signal", "HOLD")).upper()
+    if sig == "BUY":
+        return 1
+    if sig == "SELL":
+        return -1
+    return 0
+
+
 def combine_signals(
     strategy_out: dict,
     current_atr_norm: float | None,
     cfg: SignalConfig | None = None,
     regime_cfg: RegimeConfig | None = None,
+    ai_out: dict | None = None,
 ) -> dict:
-    """Combine momentum + mean-reversion into one action/confidence output."""
+    """Combine the three voters into one action/confidence output.
+
+    Voters:
+    - momentum (rule)
+    - mean-reversion (rule)
+    - ai_predictor (deterministic rule-based scorer; optional, weight in
+      ``SignalConfig.ai_predictor_weight``).
+
+    The AI voter is included to satisfy the hybrid-consensus requirement
+    described in ``.claude/rules/01-project-context.md``. Its weight is
+    deliberately small so it cannot override two agreeing rule voters.
+    """
     cfg = cfg or CONFIG.signal
 
     regime = str(strategy_out.get("regime", "choppy"))
@@ -85,12 +109,22 @@ def combine_signals(
     m_strength = _clip01(float(mom.get("raw_strength", 0.0)))
     r_strength = _clip01(float(mr.get("raw_strength", 0.0)))
 
+    ai_enabled = cfg.use_ai_predictor and ai_out is not None
+    a_sig = _ai_signal_int(ai_out) if ai_enabled else 0
+    a_strength = _clip01(float(ai_out.get("confidence", 0.0))) if ai_enabled else 0.0
+
     if regime in ("trending_up", "trending_down"):
         w_mom, w_mr = cfg.trend_momentum_weight, cfg.trend_meanrev_weight
     elif regime == "ranging":
         w_mom, w_mr = cfg.range_momentum_weight, cfg.range_meanrev_weight
     else:
         w_mom, w_mr = cfg.choppy_momentum_weight, cfg.choppy_meanrev_weight
+
+    # Renormalize rule weights down to leave room for the AI voter.
+    w_ai = cfg.ai_predictor_weight if ai_enabled else 0.0
+    scale = max(0.0, 1.0 - w_ai)
+    w_mom *= scale
+    w_mr *= scale
 
     buy_score = 0.0
     sell_score = 0.0
@@ -104,15 +138,20 @@ def combine_signals(
     elif r_sig == -1:
         sell_score += w_mr * r_strength
 
+    if a_sig == 1:
+        buy_score += w_ai * a_strength
+    elif a_sig == -1:
+        sell_score += w_ai * a_strength
+
     if buy_score == 0.0 and sell_score == 0.0:
         return {
             "action": "HOLD",
             "confidence": 0.0,
             "score": 0.0,
             "regime": regime,
-            "details": {"momentum": mom, "mean_reversion": mr},
-            "buy_agreement": int(m_sig == 1) + int(r_sig == 1),
-            "sell_agreement": int(m_sig == -1) + int(r_sig == -1),
+            "details": {"momentum": mom, "mean_reversion": mr, "ai": ai_out or {}},
+            "buy_agreement": int(m_sig == 1) + int(r_sig == 1) + int(a_sig == 1),
+            "sell_agreement": int(m_sig == -1) + int(r_sig == -1) + int(a_sig == -1),
         }
 
     action = "BUY" if buy_score > sell_score else "SELL"
@@ -125,6 +164,12 @@ def combine_signals(
 
     if m_sig != 0 and r_sig != 0 and m_sig == r_sig:
         confidence += cfg.agreement_bonus
+
+    # Small extra nudge when the AI voter also agrees with the action.
+    if ai_enabled and (
+        (action == "BUY" and a_sig == 1) or (action == "SELL" and a_sig == -1)
+    ):
+        confidence += cfg.ai_agreement_bonus
 
     if regime in ("trending_up", "trending_down") and ((m_sig == 1 and action == "BUY") or (m_sig == -1 and action == "SELL")):
         confidence += cfg.regime_quality_bonus
@@ -176,9 +221,14 @@ def combine_signals(
                 "signal": r_sig,
                 "raw_strength": round(r_strength, 4),
             },
+            "ai": {
+                "signal": a_sig,
+                "raw_strength": round(a_strength, 4),
+                "enabled": ai_enabled,
+            },
         },
-        "buy_agreement": int(m_sig == 1) + int(r_sig == 1),
-        "sell_agreement": int(m_sig == -1) + int(r_sig == -1),
+        "buy_agreement": int(m_sig == 1) + int(r_sig == 1) + int(a_sig == 1),
+        "sell_agreement": int(m_sig == -1) + int(r_sig == -1) + int(a_sig == -1),
     }
 
 
