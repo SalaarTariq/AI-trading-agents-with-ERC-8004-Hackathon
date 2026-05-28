@@ -28,15 +28,13 @@ from risk.risk_manager import (
     PortfolioState,
     RiskResult,
     check_risk,
-    check_trailing_stop,
+    compute_trailing_stop,
     update_after_trade,
 )
 from utils.indicators import indicators_at, precompute_all_indicators
 from validation.proof_logger import log_decision
 
 logger = logging.getLogger(__name__)
-
-TRADE_LOG_DEFAULT = Path("data/trade_history.jsonl")
 
 
 # ---------------------------------------------------------------------------
@@ -59,16 +57,14 @@ class Position:
 
     def update_trailing_stop(self, current_price: float, cfg: RiskConfig) -> None:
         """Tighten the stop in place using the risk manager rule."""
-        # check_trailing_stop still expects a dict — keep a thin adapter so the
-        # rule lives in one place. Mutates this dataclass via assignment.
-        as_dict = {
-            "action": self.action,
-            "entry_price": self.entry_price,
-            "stop_loss": self.stop_loss,
-            "take_profit": self.take_profit,
-        }
-        check_trailing_stop(as_dict, current_price, cfg)
-        self.stop_loss = float(as_dict["stop_loss"])
+        self.stop_loss = compute_trailing_stop(
+            action=self.action,
+            entry_price=self.entry_price,
+            stop_loss=self.stop_loss,
+            take_profit=self.take_profit,
+            current_price=current_price,
+            cfg=cfg,
+        )
 
     def check_exit(self, high: float, low: float) -> tuple[bool, float]:
         """Return (closed, pnl) using SL/TP touches against the bar range."""
@@ -181,13 +177,13 @@ class PaperTrader:
         cfg: AppConfig | None = None,
         *,
         dataset_label: str = "",
-        trade_log_path: Path | str = TRADE_LOG_DEFAULT,
+        trade_log_path: Path | str | None = None,
         warmup: int | None = None,
     ) -> None:
         self.df = df
         self.cfg = cfg or CONFIG
         self.dataset_label = dataset_label
-        self.trade_log_path = Path(trade_log_path)
+        self.trade_log_path = Path(trade_log_path or self.cfg.trade_log_path)
         self.warmup = warmup if warmup is not None else required_warmup_bars(self.cfg.strategy)
 
         self.pre = precompute_all_indicators(df, self.cfg.strategy)
@@ -458,7 +454,7 @@ def run_paper_trading(
     cfg: AppConfig | None = None,
     warmup: int | None = None,
     dataset_label: str = "",
-    trade_log_path: Path | str = TRADE_LOG_DEFAULT,
+    trade_log_path: Path | str | None = None,
 ) -> dict:
     """Run full paper-trading simulation on OHLCV data.
 
