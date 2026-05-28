@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from modules.ai_predictor import generate_signal_from_strategy_outputs
+from modules.ai_predictor import generate_signal_from_strategy_outputs, predict_from_indicators
 
 
 class TestOutputFormat:
@@ -105,3 +105,32 @@ class TestEdgeCases:
         signals = {"momentum": {"signal": 1, "raw_strength": 0.5}}
         result = generate_signal_from_strategy_outputs(signals, sample_ohlcv)
         assert result["metadata"]["source"] == "rule_based_scorer"
+
+
+class TestHoldBand:
+    """Predictions in the prob_up ~ 0.5 band must surface as HOLD."""
+
+    def test_neutral_signals_return_hold(self):
+        # All inputs zero → indicator_score=0, prob_up=0.5 → HOLD.
+        result = predict_from_indicators(
+            strategy_signals={
+                "momentum": {"signal": 0, "raw_strength": 0.0},
+                "mean_reversion": {"signal": 0, "raw_strength": 0.0},
+            },
+            ind=None,
+            close_price=3000.0,
+        )
+        assert result["signal"] == "HOLD"
+        assert result["prob_up"] == pytest.approx(0.5, abs=1e-6)
+        assert result["confidence"] == pytest.approx(0.0, abs=1e-6)
+
+    def test_ind_none_scores_zero(self):
+        # _score_indicators(None, _) must return 0 without crashing.
+        result = predict_from_indicators(
+            strategy_signals={"momentum": {"signal": 1, "raw_strength": 1.0}},
+            ind=None,
+            close_price=3000.0,
+        )
+        assert result["metadata"]["indicator_score"] == 0.0
+        # With only momentum at full strength, signal should be BUY.
+        assert result["signal"] == "BUY"

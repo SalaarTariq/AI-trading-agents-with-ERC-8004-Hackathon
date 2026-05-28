@@ -154,3 +154,64 @@ class TestThresholdHelper:
         low = effective_confidence_threshold(base=0.60, current_atr_norm=0.01, signal_cfg=cfg)
         high = effective_confidence_threshold(base=0.60, current_atr_norm=0.05, signal_cfg=cfg)
         assert high > low
+
+    def test_none_atr_returns_base(self):
+        cfg = SignalConfig(execute_confidence_threshold=0.60)
+        out = effective_confidence_threshold(base=0.55, current_atr_norm=None, signal_cfg=cfg)
+        assert out == 0.55
+
+    def test_medium_atr_uplifts_to_floor(self):
+        cfg = SignalConfig(
+            execute_confidence_threshold=0.60,
+            atr_norm_medium=0.025,
+            atr_norm_high=0.035,
+            threshold_floor_medium_atr=0.72,
+            threshold_floor_high_atr=0.80,
+        )
+        # ATR in the medium band → floored at 0.72
+        out = effective_confidence_threshold(base=0.50, current_atr_norm=0.028, signal_cfg=cfg)
+        assert out == pytest.approx(0.72, rel=1e-6)
+
+
+class TestMeanReversionSellPath:
+    """Cover the SELL branch in combine_signals (was previously untested)."""
+
+    def test_ranging_sell_combines_correctly(self):
+        cfg = SignalConfig(
+            execute_confidence_threshold=0.30,
+            strong_support_min_strength=0.20,
+            use_ai_predictor=False,
+        )
+        out = combine_signals(
+            {
+                "regime": "ranging",
+                "momentum": {"signal": 0, "raw_strength": 0.0},
+                "mean_reversion": {"signal": -1, "raw_strength": 0.8},
+                "atr_percentile_rank": 0.50,
+            },
+            current_atr_norm=0.01,
+            cfg=cfg,
+        )
+        assert out["action"] == "SELL"
+        assert out["sell_agreement"] >= 1
+
+
+class TestAISignalNoneShortCircuit:
+    """Guard the ai_out=None path inside the AI helper."""
+
+    def test_none_ai_out_does_not_crash(self):
+        cfg = SignalConfig(
+            execute_confidence_threshold=0.30,
+            strong_support_min_strength=0.20,
+            use_ai_predictor=True,
+        )
+        out = combine_signals(
+            _trending_up_with({"signal": 1, "raw_strength": 0.7}),
+            current_atr_norm=0.01,
+            cfg=cfg,
+            ai_out=None,
+        )
+        # When ai_out is None and AI is enabled in cfg, the voter is still
+        # disabled at runtime — combine_signals reads ai_enabled which
+        # requires ai_out to be non-None.
+        assert out["details"]["ai"]["enabled"] is False

@@ -5,6 +5,8 @@ This is a critical module — tests cover all boundary conditions,
 emergency rules, and edge cases.
 """
 
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -272,3 +274,79 @@ class TestUpdateAfterTrade:
         )
         updated = update_after_trade(portfolio, trade_pnl=5000)
         assert updated.peak_value == 105_000
+
+
+class TestVolatilityFilter:
+    """ATR-based size reduction when volatility is elevated."""
+
+    def test_high_atr_reduces_size(self, default_portfolio):
+        # ATR norm above the reduce threshold should shrink the position
+        # and surface a warning. Default high_volatility_size_mult = 0.60.
+        cfg = RiskConfig(
+            atr_volatility_reduce_threshold=0.03,
+            high_volatility_size_mult=0.60,
+            atr_sl_multiplier=2.0,
+        )
+        pre_ind = SimpleNamespace(atr_14=120.0, atr_norm_14=0.05)
+        result = check_risk(
+            signal="BUY", confidence=0.85, entry_price=3000.0,
+            requested_size=10_000, portfolio=default_portfolio, cfg=cfg,
+            regime="trending_up", pre_ind=pre_ind,
+        )
+        assert result.approved is True
+        assert any("High volatility" in w for w in result.warnings)
+        # Position should be at most the post-reduction cap.
+        assert result.adjusted_size <= 10_000 * 0.60 + 1e-6
+
+    def test_low_atr_no_reduction(self, default_portfolio):
+        cfg = RiskConfig(atr_volatility_reduce_threshold=0.03)
+        pre_ind = SimpleNamespace(atr_14=30.0, atr_norm_14=0.01)
+        result = check_risk(
+            signal="BUY", confidence=0.85, entry_price=3000.0,
+            requested_size=10_000, portfolio=default_portfolio, cfg=cfg,
+            regime="trending_up", pre_ind=pre_ind,
+        )
+        assert result.approved is True
+        assert not any("High volatility" in w for w in result.warnings)
+
+
+class TestConfigurableCooldown:
+    """Cooldown duration is sourced from RiskConfig, not hardcoded."""
+
+    def test_cooldown_bars_respects_config(self):
+        portfolio = PortfolioState(
+            total_value=95_000, cash=75_000,
+            consecutive_losses=3, peak_value=100_000,
+        )
+        cfg = RiskConfig(consecutive_loss_pause=3, consecutive_loss_cooldown_bars=12)
+        result = check_risk(
+            signal="BUY", confidence=0.9, entry_price=3000.0,
+            requested_size=10_000, portfolio=portfolio, cfg=cfg,
+        )
+        assert result.approved is False
+        assert portfolio.cooldown_bars == 12
+        assert any("12-bar cooldown" in r for r in result.reasons)
+
+
+class TestRiskPerTradeCap:
+    """Per-trade risk cap clamps size based on stop distance."""
+
+    def test_size_clamped_by_risk_per_trade(self, default_portfolio):
+        # risk_per_trade_pct = 0.005 → max risk = $500 on a $100k book.
+        # stop_loss_pct = 0.04 → max size = 500 / 0.04 = $12_500.
+        # Use trending_up regime so position_mult=1.0 doesn't shrink the
+        # request before the risk-per-trade clamp runs.
+        cfg = RiskConfig(
+            risk_per_trade_pct=0.005,
+            stop_loss_pct=0.04,
+            max_position_pct=0.30,
+            use_dynamic_sl_tp=False,
+        )
+        result = check_risk(
+            signal="BUY", confidence=0.85, entry_price=3000.0,
+            requested_size=20_000, portfolio=default_portfolio, cfg=cfg,
+            regime="trending_up",
+        )
+        assert result.approved is True
+        assert any("Risk-per-trade" in w for w in result.warnings)
+        assert result.adjusted_size == pytest.approx(12_500.0, rel=1e-3)
