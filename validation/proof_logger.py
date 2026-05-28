@@ -164,16 +164,14 @@ def verify_log_integrity(log_path: str | Path | None = None) -> dict:
 
 
 def _summarize(record: dict) -> str:
-    """Create a one-line human-readable summary of a decision record."""
-    # Support both legacy shape (final_decision at top-level)
-    # and ERC-8004 wrapper shape (decision.final_decision).
-    decision = record.get("final_decision", {})
-    if not decision and isinstance(record.get("decision"), dict):
-        decision = record["decision"].get("final_decision", {}) or {}
+    """Create a one-line human-readable summary of an ERC-8004 wrapper record."""
+    inner = record.get("decision", {}) if isinstance(record.get("decision"), dict) else {}
+    decision = inner.get("final_decision", {}) if isinstance(inner.get("final_decision"), dict) else {}
+
     action = decision.get("action", "UNKNOWN")
     pair = decision.get("pair", "?")
-    price = decision.get("entry_price", 0)
-    size = decision.get("size", 0)
+    price = decision.get("entry_price", 0) or 0
+    size = decision.get("size", 0) or 0
 
     if action in ("BUY", "SELL"):
         return f"{action} {pair} @ ${price:,.2f} (size ${size:,.0f})"

@@ -16,31 +16,6 @@ def _clip01(value: float) -> float:
     return float(np.clip(value, 0.0, 1.0))
 
 
-def get_execution_threshold(
-    current_atr_norm: float | None,
-    cfg: SignalConfig | None = None,
-    *,
-    base_threshold: float | None = None,
-) -> float:
-    """Return the execution threshold with a volatility uplift.
-
-    ``base_threshold`` is accepted for callers that need to override the
-    base directly (e.g. a regime-specific floor).
-    """
-    cfg = cfg or CONFIG.signal
-    base = base_threshold if base_threshold is not None else cfg.execute_confidence_threshold
-
-    if current_atr_norm is None:
-        return base
-
-    atr = max(0.0, float(current_atr_norm))
-    if atr >= 0.035:
-        return max(base, 0.80)
-    if atr >= 0.025:
-        return max(base, 0.72)
-    return base
-
-
 def effective_confidence_threshold(
     *,
     base: float,
@@ -60,11 +35,15 @@ def effective_confidence_threshold(
     *how* they react to high-ATR conditions, only on *what* base they
     consider acceptable in calm markets.
     """
-    return get_execution_threshold(
-        current_atr_norm,
-        signal_cfg or CONFIG.signal,
-        base_threshold=base,
-    )
+    cfg = signal_cfg or CONFIG.signal
+    if current_atr_norm is None:
+        return base
+    atr = max(0.0, float(current_atr_norm))
+    if atr >= cfg.atr_norm_high:
+        return max(base, cfg.threshold_floor_high_atr)
+    if atr >= cfg.atr_norm_medium:
+        return max(base, cfg.threshold_floor_medium_atr)
+    return base
 
 
 def _ai_signal_int(ai_out: dict | None) -> int:
