@@ -100,9 +100,12 @@ def _cooldown_gate(portfolio: PortfolioState, cfg: RiskConfig) -> str | None:
     if portfolio.cooldown_bars > 0:
         return f"Cooldown active: {portfolio.cooldown_bars} bars remaining"
     if portfolio.consecutive_losses >= cfg.consecutive_loss_pause:
-        portfolio.cooldown_bars = 8
+        portfolio.cooldown_bars = cfg.consecutive_loss_cooldown_bars
         portfolio.consecutive_losses = 0
-        return "Consecutive loss protection triggered (8-bar cooldown)"
+        return (
+            f"Consecutive loss protection triggered "
+            f"({cfg.consecutive_loss_cooldown_bars}-bar cooldown)"
+        )
     return None
 
 
@@ -142,7 +145,7 @@ def _apply_regime_and_volatility(
 
     if atr_norm > cfg.atr_volatility_reduce_threshold:
         warnings.append(f"High volatility ATR_norm={atr_norm:.3f}; reducing size")
-        mult *= 0.60
+        mult *= cfg.high_volatility_size_mult
 
     return size * mult
 
@@ -308,46 +311,58 @@ def check_risk(
 # ---------------------------------------------------------------------------
 
 
+def compute_trailing_stop(
+    *,
+    action: str,
+    entry_price: float,
+    stop_loss: float,
+    take_profit: float,
+    current_price: float,
+    cfg: RiskConfig | None = None,
+) -> float:
+    """Pure trailing-stop math: return the new SL (never looser than current).
+
+    Activates at ``cfg.trailing_breakeven_pct`` of the path to TP and locks in
+    ``cfg.trailing_lock_pct`` of the realized move from entry.
+    """
+    cfg = cfg or CONFIG.risk
+    if not cfg.use_trailing_stop:
+        return stop_loss
+
+    if action == "BUY":
+        tp_distance = take_profit - entry_price
+        progress = current_price - entry_price
+    else:
+        tp_distance = entry_price - take_profit
+        progress = entry_price - current_price
+
+    if tp_distance <= 0:
+        return stop_loss
+
+    if progress / tp_distance < cfg.trailing_breakeven_pct:
+        return stop_loss
+
+    if action == "BUY":
+        new_sl = entry_price + progress * cfg.trailing_lock_pct
+        return max(stop_loss, round(new_sl, 8))
+    new_sl = entry_price - progress * cfg.trailing_lock_pct
+    return min(stop_loss, round(new_sl, 8))
+
+
 def check_trailing_stop(
     position: dict,
     current_price: float,
     cfg: RiskConfig | None = None,
 ) -> dict:
-    """Tighten stop as a trade moves toward take-profit.
-
-    Activates at 60% of the path to TP and locks in 70% of the realized
-    move from entry. Operates in place on the ``position`` dict for
-    backwards compatibility; ``Position.update_trailing_stop`` is the
-    typed wrapper.
-    """
-    cfg = cfg or CONFIG.risk
-    if not cfg.use_trailing_stop:
-        return position
-
-    entry = float(position["entry_price"])
-    sl = float(position["stop_loss"])
-    tp = float(position["take_profit"])
-    action = str(position["action"])
-
-    if action == "BUY":
-        tp_distance = tp - entry
-        progress = current_price - entry
-    else:
-        tp_distance = entry - tp
-        progress = entry - current_price
-
-    if tp_distance <= 0:
-        return position
-
-    progress_pct = progress / tp_distance
-    if progress_pct >= cfg.trailing_breakeven_pct:
-        if action == "BUY":
-            new_sl = entry + progress * cfg.trailing_lock_pct
-            position["stop_loss"] = max(sl, round(new_sl, 8))
-        else:
-            new_sl = entry - progress * cfg.trailing_lock_pct
-            position["stop_loss"] = min(sl, round(new_sl, 8))
-
+    """Dict-based wrapper around ``compute_trailing_stop``; mutates in place."""
+    position["stop_loss"] = compute_trailing_stop(
+        action=str(position["action"]),
+        entry_price=float(position["entry_price"]),
+        stop_loss=float(position["stop_loss"]),
+        take_profit=float(position["take_profit"]),
+        current_price=current_price,
+        cfg=cfg,
+    )
     return position
 
 
