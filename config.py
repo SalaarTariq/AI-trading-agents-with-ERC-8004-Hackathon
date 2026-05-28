@@ -74,6 +74,15 @@ class SignalConfig:
     regime_quality_bonus: float = 0.10
     high_volatility_penalty: float = 0.20
 
+    # Volatility uplift applied to the confidence threshold. When ATR norm
+    # crosses these levels, the effective threshold is floored at the
+    # corresponding value. Single source — used by combine_signals and the
+    # risk manager's confidence gate.
+    atr_norm_high: float = 0.035
+    atr_norm_medium: float = 0.025
+    threshold_floor_high_atr: float = 0.80
+    threshold_floor_medium_atr: float = 0.72
+
     # AI-predictor voter (third opinion). Weight is small so it cannot
     # outvote the rule signals; disable via use_ai_predictor=False.
     use_ai_predictor: bool = True
@@ -142,9 +151,13 @@ class RiskConfig:
     trailing_lock_pct: float = 0.70
 
     consecutive_loss_pause: int = 3
+    consecutive_loss_cooldown_bars: int = 8
 
     # Multiplier applied to position size while defensive mode is active.
     defensive_size_mult: float = 0.50
+
+    # Size multiplier applied when ATR norm exceeds atr_volatility_reduce_threshold.
+    high_volatility_size_mult: float = 0.60
 
 
 @dataclass
@@ -160,6 +173,7 @@ class AppConfig:
     log_level: str = "INFO"
     data_dir: str = "data"
     proof_log_path: str = "validation/proof_log.jsonl"
+    trade_log_path: str = "data/trade_history.jsonl"
     dashboard_refresh_seconds: int = 5
 
 
